@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Award,
@@ -34,6 +34,26 @@ export function SkillGapAnalyzer({ analysis, answers }) {
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
   const [activeRoadmapTab, setActiveRoadmapTab] = useState("weekly");
+
+  // Reset results if the user changes any input parameter
+  useEffect(() => {
+    setResults(null);
+    setError(null);
+  }, [selectedPath, city, country, studentSkillsText]);
+
+  // Reset inputs and results if the user changes the questionnaire answers or recommendations
+  useEffect(() => {
+    setSelectedPath(recommendedPaths[0]?.title || "");
+    setCity(answers?.basicInfo?.city || "");
+    setCountry(answers?.basicInfo?.country || "India");
+    setStudentSkillsText(
+      answers?.strengthsInterests?.primaryStrength
+        ? `${answers.strengthsInterests.primaryStrength}, ${answers.strengthsInterests.energizingTasks || ""}`
+        : "Python, SQL, Git"
+    );
+    setResults(null);
+    setError(null);
+  }, [analysis, answers]);
 
   const loadingMessages = [
     "Contacting JSearch API to scrape live job postings...",
