@@ -18,11 +18,13 @@ import {
   Shield,
   Zap,
   Award,
-  AlertCircle
+  AlertCircle,
+  Activity
 } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, Legend } from "recharts";
+import { SkillGapAnalyzer } from "./SkillGapAnalyzer";
 
-export function CareerReport({ analysis, jobs, onRestart }) {
+export function CareerReport({ analysis, jobs, answers, onRestart }) {
   const {
     summary,
     careerPaths = [],
@@ -31,6 +33,7 @@ export function CareerReport({ analysis, jobs, onRestart }) {
     actionItems = [],
   } = analysis;
 
+  const [activeTab, setActiveTab] = useState("report");
   const [selectedPath, setSelectedPath] = useState(careerPaths[0]?.title || "");
   const [compareWith, setCompareWith] = useState("");
   const [compareLoading, setCompareLoading] = useState(false);
@@ -94,12 +97,48 @@ export function CareerReport({ analysis, jobs, onRestart }) {
         </div>
       </motion.div>
 
-      {/* Main Career Matches Grid */}
-      <div className="space-y-6">
-        <div className="flex items-center gap-2">
-          <Sparkles className="h-5 w-5 text-primary" />
-          <h2 className="text-xl font-bold text-foreground">Top Career Path Matches</h2>
+      {/* Tabs Navigation */}
+      <div className="flex justify-center border-b border-border/30 pb-4">
+        <div className="flex rounded-2xl bg-secondary/35 p-1 text-xs">
+          <button
+            type="button"
+            onClick={() => setActiveTab("report")}
+            className={`flex items-center gap-1.5 px-5 py-2.5 rounded-xl font-bold transition-all ${
+              activeTab === "report" ? "bg-primary text-primary-foreground shadow-soft" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Compass className="h-4 w-4" />
+            Career Recommendations
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("skillgap")}
+            className={`flex items-center gap-1.5 px-5 py-2.5 rounded-xl font-bold transition-all ${
+              activeTab === "skillgap" ? "bg-primary text-primary-foreground shadow-soft" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Activity className="h-4 w-4" />
+            AI Skill Gap Analyzer
+          </button>
         </div>
+      </div>
+
+      <AnimatePresence mode="wait">
+        {activeTab === "report" ? (
+          <motion.div
+            key="report"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.3 }}
+            className="space-y-12"
+          >
+            {/* Main Career Matches Grid */}
+            <div className="space-y-6">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-primary" />
+                <h2 className="text-xl font-bold text-foreground">Top Career Path Matches</h2>
+              </div>
         <div className="grid gap-6 md:grid-cols-3">
           {careerPaths.slice(0, 3).map((path, idx) => (
             <motion.div
@@ -660,6 +699,19 @@ export function CareerReport({ analysis, jobs, onRestart }) {
           )}
         </AnimatePresence>
       </motion.div>
+          </motion.div>
+        ) : (
+          <motion.div
+            key="skillgap"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.3 }}
+          >
+            <SkillGapAnalyzer analysis={analysis} answers={answers} />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Restart Button */}
       <div className="flex justify-center pt-4">

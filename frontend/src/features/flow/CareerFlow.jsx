@@ -156,6 +156,7 @@ export function CareerFlow() {
           <CareerReport
             analysis={result.analysis}
             jobs={result.jobs}
+            answers={answers}
             onRestart={() => {
               setSubmitted(false);
               setResult(null);
