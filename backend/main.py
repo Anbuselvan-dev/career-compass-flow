@@ -370,6 +370,92 @@ Summary: {analysis.get("summary", "")}
     return {"analysis": analysis, "jobs": jobs}
 
 
+class CompareRequest(BaseModel):
+    career_a: str
+    career_b: str
+
+
+def get_gemini_comparison(career_a: str, career_b: str, api_key: str) -> Dict[str, Any]:
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="GEMINI_API_KEY is not set in backend/.env. Add your Google AI Studio key."
+        )
+
+    prompt = f"""Compare the following two career paths in detail:
+1. Career A: {career_a}
+2. Career B: {career_b}
+
+Generate a comprehensive comparison report covering salaries, job demand, core skills, government relevance, operational factors, and a personal recommendation verdict.
+
+Return ONLY a raw JSON object (no markdown, no code fences) with this exact schema:
+{{
+  "career_a": {{
+    "title": "Exact Title of Career A",
+    "demand": "High/Medium/Low",
+    "demand_trend": "Brief explanation of hiring volume and market health (1-2 sentences)",
+    "salary": {{
+      "entry": "$40k - $60k",
+      "mid": "$70k - $95k",
+      "senior": "$110k - $145k"
+    }},
+    "skills": {{
+      "technical": ["Skill 1", "Skill 2", "Skill 3"],
+      "soft": ["Skill A", "Skill B", "Skill C"]
+    }},
+    "govt_relevance": "Brief overview of government job availability, public sector openings, or civil service relevance for this role (1-2 sentences)"
+  }},
+  "career_b": {{
+    "title": "Exact Title of Career B",
+    "demand": "High/Medium/Low",
+    "demand_trend": "Brief explanation of hiring volume and market health (1-2 sentences)",
+    "salary": {{
+      "entry": "$45k - $65k",
+      "mid": "$80k - $105k",
+      "senior": "$120k - $160k"
+    }},
+    "skills": {{
+      "technical": ["Skill 1", "Skill 2", "Skill 3"],
+      "soft": ["Skill A", "Skill B", "Skill C"]
+    }},
+    "govt_relevance": "Brief overview of government job availability, public sector openings, or civil service relevance for this role (1-2 sentences)"
+  }},
+  "comparison_matrix": {{
+    "learning_curve": "Comparative difficulty and typical time to achieve entry-level readiness",
+    "work_life_balance": "Comparative analysis of standard working hours, work stress, and lifestyle factors",
+    "remote_opportunities": "Comparison of remote-friendliness vs on-site requirements",
+    "ai_susceptibility": "Comparison of automation risk, susceptibility to AI tools, and job resilience",
+    "long_term_growth": "Comparison of advancement speed and path options over the next 10 years"
+  }},
+  "verdict": "Clear summary recommendation of which path might suit which type of person best based on values, skill types, and long-term targets (2-3 sentences)"
+}}"""
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json"}
+    }
+
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=25)
+        res.raise_for_status()
+        data = res.json()
+        text_content = data["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text_content)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Gemini Comparison API call failed: {str(e)}"
+        )
+
+
+@app.post("/api/compare")
+async def compare_careers(request: CompareRequest):
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    return get_gemini_comparison(request.career_a, request.career_b, gemini_key)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
