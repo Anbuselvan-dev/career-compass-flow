@@ -137,21 +137,23 @@ export function SkillGapAnalyzer({ analysis, answers }) {
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 items-end">
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-muted-foreground block">Target Career Path</label>
-            <select
+            <input
+              type="text"
+              list="career-options"
               value={selectedPath}
               onChange={(e) => setSelectedPath(e.target.value)}
+              placeholder="Select or type custom career path"
               className="w-full rounded-xl border border-border bg-background px-4 py-3 text-xs outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/20 text-foreground"
-            >
+            />
+            <datalist id="career-options">
               {recommendedPaths.map((path) => (
-                <option key={path.title} value={path.title}>
-                  {path.title}
-                </option>
+                <option key={path.title} value={path.title} />
               ))}
-              <option value="Full Stack Developer">Full Stack Developer</option>
-              <option value="Cybersecurity Analyst">Cybersecurity Analyst</option>
-              <option value="Cloud Engineer">Cloud Engineer</option>
-              <option value="Data Scientist">Data Scientist</option>
-            </select>
+              <option value="Full Stack Developer" />
+              <option value="Cybersecurity Analyst" />
+              <option value="Cloud Engineer" />
+              <option value="Data Scientist" />
+            </datalist>
           </div>
 
           <div className="space-y-1.5">
@@ -260,7 +262,15 @@ export function SkillGapAnalyzer({ analysis, answers }) {
           transition={{ duration: 0.4 }}
           className="space-y-8"
         >
-          {results.confidence_low && (
+          {results.is_simulated ? (
+            <div className="flex items-start gap-2.5 p-4 rounded-xl border border-warning/20 bg-warning/10 text-xs text-warning">
+              <Sparkles className="h-4.5 w-4.5 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <span className="font-semibold block">Live Market Fetch Offline (Simulated Output)</span>
+                <span>The live job search returned 0 postings (likely due to subscription limits or region matching). We have simulated a set of 15 current job postings for '{selectedPath}' in '{city || country}' using AI models to complete the gap analysis successfully.</span>
+              </div>
+            </div>
+          ) : results.confidence_low && (
             <div className="flex items-start gap-2.5 p-4 rounded-xl border border-warning/20 bg-warning/10 text-xs text-warning">
               <AlertTriangle className="h-4.5 w-4.5 shrink-0 mt-0.5" />
               <div className="space-y-0.5">
