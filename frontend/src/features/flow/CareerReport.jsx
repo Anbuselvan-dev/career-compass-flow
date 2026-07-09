@@ -1,4 +1,5 @@
-import { motion } from "motion/react";
+import { useState } from "react";
+import { motion, AnimatePresence } from "motion/react";
 import {
   TrendingUp,
   DollarSign,
@@ -12,6 +13,12 @@ import {
   Briefcase,
   ChevronRight,
   RefreshCw,
+  GitCompare,
+  Cpu,
+  Shield,
+  Zap,
+  Award,
+  AlertCircle
 } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, Legend } from "recharts";
 
@@ -23,6 +30,40 @@ export function CareerReport({ analysis, jobs, onRestart }) {
     strengthsAlignment,
     actionItems = [],
   } = analysis;
+
+  const [selectedPath, setSelectedPath] = useState(careerPaths[0]?.title || "");
+  const [compareWith, setCompareWith] = useState("");
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [comparisonResult, setComparisonResult] = useState(null);
+  const [compareError, setCompareError] = useState(null);
+
+  const handleCompare = async () => {
+    if (!compareWith.trim()) return;
+    setCompareLoading(true);
+    setCompareError(null);
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"}/api/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          career_a: selectedPath,
+          career_b: compareWith.trim()
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setComparisonResult(data);
+    } catch (e) {
+      console.error(e);
+      setCompareError("Failed to fetch comparison report. Please make sure your backend server is running.");
+    } finally {
+      setCompareLoading(false);
+    }
+  };
 
   // Colors for charting different paths
   const pathColors = [
@@ -302,6 +343,323 @@ export function CareerReport({ analysis, jobs, onRestart }) {
           </div>
         </motion.div>
       </div>
+
+      {/* Career Comparison Playground Section */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.5 }}
+        className="rounded-3xl border border-border/70 bg-card/65 p-6 shadow-card space-y-8"
+      >
+        <div className="space-y-1.5">
+          <h3 className="text-lg font-bold text-foreground flex items-center gap-2">
+            <GitCompare className="h-5 w-5 text-primary" />
+            Interactive Career Comparison
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            Compare your recommended paths with any other career track (e.g. Cybersecurity, Cloud Engineering, Full Stack) to see real-time salary, demand, and skill differences.
+          </p>
+        </div>
+
+        {/* Inputs Form */}
+        <div className="grid gap-4 sm:grid-cols-3 items-end">
+          <div className="space-y-2">
+            <label className="text-xs font-semibold text-muted-foreground block">Career A (Recommended)</label>
+            <select
+              value={selectedPath}
+              onChange={(e) => setSelectedPath(e.target.value)}
+              className="w-full rounded-xl border border-border bg-background px-4 py-3 text-xs outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/20 text-foreground"
+            >
+              {careerPaths.map((path) => (
+                <option key={path.title} value={path.title}>
+                  {path.title}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-xs font-semibold text-muted-foreground block">Career B (Compare With)</label>
+            <input
+              type="text"
+              value={compareWith}
+              onChange={(e) => setCompareWith(e.target.value)}
+              placeholder="e.g. Cybersecurity Specialist, Cloud Engineer"
+              className="w-full rounded-xl border border-border bg-background px-4 py-3 text-xs outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary focus:ring-2 focus:ring-primary/20 text-foreground"
+            />
+          </div>
+
+          <div>
+            <button
+              type="button"
+              onClick={handleCompare}
+              disabled={compareLoading || !compareWith.trim()}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-primary px-6 py-3 text-xs font-semibold text-primary-foreground shadow-soft transition-all hover:-translate-y-0.5 hover:shadow-card disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
+            >
+              {compareLoading ? (
+                <>
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  Comparing...
+                </>
+              ) : (
+                <>
+                  <GitCompare className="h-4 w-4" />
+                  Compare Careers
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Quick Suggestions Helper */}
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-muted-foreground">Popular ideas:</span>
+          {["Cybersecurity", "Cloud Engineer", "Full Stack Developer", "Data Scientist"].map((item) => (
+            <button
+              key={item}
+              type="button"
+              onClick={() => setCompareWith(item)}
+              className="px-2.5 py-1 rounded-full bg-secondary/80 text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+            >
+              {item}
+            </button>
+          ))}
+        </div>
+
+        {/* Error Notification */}
+        {compareError && (
+          <div className="flex items-center gap-2 p-4 rounded-xl border border-destructive/20 bg-destructive/10 text-xs text-destructive">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            <span>{compareError}</span>
+          </div>
+        )}
+
+        {/* Comparison Result Display */}
+        <AnimatePresence mode="wait">
+          {comparisonResult && (
+            <motion.div
+              key={comparisonResult.career_a.title + "_" + comparisonResult.career_b.title}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3 }}
+              className="space-y-6 pt-4 border-t border-border/40"
+            >
+              {/* Main Comparison Column Grid */}
+              <div className="grid gap-6 md:grid-cols-2">
+                {/* Career A Details */}
+                <div className="p-5 rounded-2xl border border-border/50 bg-background/40 space-y-6">
+                  <div className="flex justify-between items-start gap-4">
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-primary">Career A</span>
+                      <h4 className="text-md font-bold text-foreground">{comparisonResult.career_a.title}</h4>
+                    </div>
+                    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ring-1 ring-inset ${
+                      comparisonResult.career_a.demand === "High" ? "bg-success/10 text-success ring-success/20" :
+                      comparisonResult.career_a.demand === "Medium" ? "bg-warning/10 text-warning ring-warning/20" :
+                      "bg-destructive/10 text-destructive ring-destructive/20"
+                    }`}>
+                      {comparisonResult.career_a.demand} Demand
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-muted-foreground leading-relaxed italic">
+                    {comparisonResult.career_a.demand_trend}
+                  </p>
+
+                  {/* Salaries */}
+                  <div className="space-y-2 border-t border-border/30 pt-4">
+                    <h5 className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                      <DollarSign className="h-4 w-4 text-success" />
+                      Salary Benchmarks
+                    </h5>
+                    <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                      <div className="p-2 rounded-xl bg-secondary/30">
+                        <span className="text-[10px] text-muted-foreground block uppercase">Entry</span>
+                        <span className="font-bold text-foreground">{comparisonResult.career_a.salary.entry}</span>
+                      </div>
+                      <div className="p-2 rounded-xl bg-secondary/30">
+                        <span className="text-[10px] text-muted-foreground block uppercase">Mid</span>
+                        <span className="font-bold text-foreground">{comparisonResult.career_a.salary.mid}</span>
+                      </div>
+                      <div className="p-2 rounded-xl bg-secondary/30">
+                        <span className="text-[10px] text-muted-foreground block uppercase">Senior</span>
+                        <span className="font-bold text-foreground">{comparisonResult.career_a.salary.senior}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Skills required */}
+                  <div className="space-y-3 border-t border-border/30 pt-4">
+                    <h5 className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                      <Award className="h-4 w-4 text-primary" />
+                      Required Skillsets
+                    </h5>
+                    <div className="space-y-2 text-xs">
+                      <div>
+                        <span className="text-[10px] text-muted-foreground block mb-1">Technical Skills:</span>
+                        <div className="flex flex-wrap gap-1">
+                          {comparisonResult.career_a.skills.technical.map((skill, idx) => (
+                            <span key={idx} className="px-2 py-0.5 rounded bg-primary/10 text-primary text-[10px] font-medium">
+                              {skill}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-muted-foreground block mb-1">Soft Skills:</span>
+                        <div className="flex flex-wrap gap-1">
+                          {comparisonResult.career_a.skills.soft.map((skill, idx) => (
+                            <span key={idx} className="px-2 py-0.5 rounded bg-secondary/60 text-muted-foreground text-[10px] font-medium">
+                              {skill}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Government Sector jobs */}
+                  <div className="space-y-1.5 border-t border-border/30 pt-4">
+                    <h5 className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                      <Shield className="h-4 w-4 text-primary" />
+                      Government Sector Relevance
+                    </h5>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      {comparisonResult.career_a.govt_relevance}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Career B Details */}
+                <div className="p-5 rounded-2xl border border-border/50 bg-background/40 space-y-6">
+                  <div className="flex justify-between items-start gap-4">
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-primary">Career B</span>
+                      <h4 className="text-md font-bold text-foreground">{comparisonResult.career_b.title}</h4>
+                    </div>
+                    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ring-1 ring-inset ${
+                      comparisonResult.career_b.demand === "High" ? "bg-success/10 text-success ring-success/20" :
+                      comparisonResult.career_b.demand === "Medium" ? "bg-warning/10 text-warning ring-warning/20" :
+                      "bg-destructive/10 text-destructive ring-destructive/20"
+                    }`}>
+                      {comparisonResult.career_b.demand} Demand
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-muted-foreground leading-relaxed italic">
+                    {comparisonResult.career_b.demand_trend}
+                  </p>
+
+                  {/* Salaries */}
+                  <div className="space-y-2 border-t border-border/30 pt-4">
+                    <h5 className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                      <DollarSign className="h-4 w-4 text-success" />
+                      Salary Benchmarks
+                    </h5>
+                    <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                      <div className="p-2 rounded-xl bg-secondary/30">
+                        <span className="text-[10px] text-muted-foreground block uppercase">Entry</span>
+                        <span className="font-bold text-foreground">{comparisonResult.career_b.salary.entry}</span>
+                      </div>
+                      <div className="p-2 rounded-xl bg-secondary/30">
+                        <span className="text-[10px] text-muted-foreground block uppercase">Mid</span>
+                        <span className="font-bold text-foreground">{comparisonResult.career_b.salary.mid}</span>
+                      </div>
+                      <div className="p-2 rounded-xl bg-secondary/30">
+                        <span className="text-[10px] text-muted-foreground block uppercase">Senior</span>
+                        <span className="font-bold text-foreground">{comparisonResult.career_b.salary.senior}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Skills required */}
+                  <div className="space-y-3 border-t border-border/30 pt-4">
+                    <h5 className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                      <Award className="h-4 w-4 text-primary" />
+                      Required Skillsets
+                    </h5>
+                    <div className="space-y-2 text-xs">
+                      <div>
+                        <span className="text-[10px] text-muted-foreground block mb-1">Technical Skills:</span>
+                        <div className="flex flex-wrap gap-1">
+                          {comparisonResult.career_b.skills.technical.map((skill, idx) => (
+                            <span key={idx} className="px-2 py-0.5 rounded bg-primary/10 text-primary text-[10px] font-medium">
+                              {skill}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-muted-foreground block mb-1">Soft Skills:</span>
+                        <div className="flex flex-wrap gap-1">
+                          {comparisonResult.career_b.skills.soft.map((skill, idx) => (
+                            <span key={idx} className="px-2 py-0.5 rounded bg-secondary/60 text-muted-foreground text-[10px] font-medium">
+                              {skill}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Government Sector jobs */}
+                  <div className="space-y-1.5 border-t border-border/30 pt-4">
+                    <h5 className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                      <Shield className="h-4 w-4 text-primary" />
+                      Government Sector Relevance
+                    </h5>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      {comparisonResult.career_b.govt_relevance}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Comparative Operations Matrix */}
+              <div className="rounded-2xl border border-border/50 bg-background/25 p-5 space-y-4">
+                <h5 className="text-xs font-semibold text-foreground flex items-center gap-1.5 border-b border-border/30 pb-2">
+                  <Zap className="h-4 w-4 text-primary" />
+                  Comparative Operations Matrix
+                </h5>
+                <div className="space-y-3 text-xs">
+                  <div className="grid sm:grid-cols-4 gap-2">
+                    <span className="font-semibold text-foreground block">Learning Curve:</span>
+                    <span className="sm:col-span-3 text-muted-foreground">{comparisonResult.comparison_matrix.learning_curve}</span>
+                  </div>
+                  <div className="grid sm:grid-cols-4 gap-2 border-t border-border/20 pt-2">
+                    <span className="font-semibold text-foreground block">Work-Life Balance:</span>
+                    <span className="sm:col-span-3 text-muted-foreground">{comparisonResult.comparison_matrix.work_life_balance}</span>
+                  </div>
+                  <div className="grid sm:grid-cols-4 gap-2 border-t border-border/20 pt-2">
+                    <span className="font-semibold text-foreground block">Remote Opportunities:</span>
+                    <span className="sm:col-span-3 text-muted-foreground">{comparisonResult.comparison_matrix.remote_opportunities}</span>
+                  </div>
+                  <div className="grid sm:grid-cols-4 gap-2 border-t border-border/20 pt-2">
+                    <span className="font-semibold text-foreground block">AI Susceptibility:</span>
+                    <span className="sm:col-span-3 text-muted-foreground">{comparisonResult.comparison_matrix.ai_susceptibility}</span>
+                  </div>
+                  <div className="grid sm:grid-cols-4 gap-2 border-t border-border/20 pt-2">
+                    <span className="font-semibold text-foreground block">Long-Term Growth:</span>
+                    <span className="sm:col-span-3 text-muted-foreground">{comparisonResult.comparison_matrix.long_term_growth}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Personal Recommendation Verdict Callout */}
+              <div className="rounded-2xl bg-gradient-primary/10 border border-primary/20 p-5 space-y-2">
+                <h5 className="text-xs font-bold text-primary flex items-center gap-1.5 uppercase tracking-wide">
+                  <Sparkles className="h-4 w-4" />
+                  Comparison Verdict
+                </h5>
+                <p className="text-xs text-foreground leading-relaxed">
+                  {comparisonResult.verdict}
+                </p>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
 
       {/* Restart Button */}
       <div className="flex justify-center pt-4">
