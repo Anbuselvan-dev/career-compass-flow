@@ -1,4 +1,5 @@
 import os
+import re
 import math
 import json
 import requests
@@ -454,6 +455,377 @@ Return ONLY a raw JSON object (no markdown, no code fences) with this exact sche
 async def compare_careers(request: CompareRequest):
     gemini_key = os.getenv("GEMINI_API_KEY")
     return get_gemini_comparison(request.career_a, request.career_b, gemini_key)
+
+
+# ─────────────────────────────────────────────────────────────
+# REAL-TIME AI SKILL GAP ANALYZER
+# ─────────────────────────────────────────────────────────────
+
+SKILL_MAP = {
+    "Python": [r"\bpython\b"],
+    "SQL": [r"\bsql\b"],
+    "JavaScript": [r"\bjavascript\b", r"\bjs\b"],
+    "TypeScript": [r"\btypescript\b", r"\bts\b"],
+    "React.js": [r"\breact\b", r"\breact\.js\b", r"\breactjs\b"],
+    "Node.js": [r"\bnode\b", r"\bnode\.js\b", r"\bnodejs\b"],
+    "Vue.js": [r"\bvue\b", r"\bvue\.js\b", r"\bvuejs\b"],
+    "Angular": [r"\bangular\b", r"\bangularjs\b"],
+    "Docker": [r"\bdocker\b"],
+    "AWS": [r"\baws\b", r"\bamazon web services\b", r"\bawsec2\b", r"\baws ec2\b"],
+    "Kubernetes": [r"\bkubernetes\b", r"\bk8s\b"],
+    "TensorFlow": [r"\btensorflow\b", r"\btensor flow\b"],
+    "PyTorch": [r"\bpytorch\b", r"\bpy torch\b"],
+    "Machine Learning": [r"\bmachine learning\b", r"\bml\b"],
+    "Deep Learning": [r"\bdeep learning\b"],
+    "Data Science": [r"\bdata science\b"],
+    "Git": [r"\bgit\b", r"\bgithub\b", r"\bgitlab\b"],
+    "MongoDB": [r"\bmongodb\b", r"\bmongo\b"],
+    "PostgreSQL": [r"\bpostgresql\b", r"\bpostgres\b"],
+    "Redis": [r"\bredis\b"],
+    "Django": [r"\bdjango\b"],
+    "FastAPI": [r"\bfastapi\b"],
+    "TailwindCSS": [r"\btailwind\b", r"\btailwindcss\b"],
+    "Figma": [r"\bfigma\b"],
+    "Framer": [r"\bframer\b"],
+    "UX Research": [r"\bux research\b", r"\buser research\b"],
+    "Data Analytics": [r"\bdata analytics\b", r"\banalytics\b"],
+    "A/B Testing": [r"\ba/b testing\b", r"\bab testing\b"],
+    "UI Design": [r"\bui design\b", r"\bvisual design\b"],
+    "Design Systems": [r"\bdesign systems\b", r"\bdesign system\b"],
+    "Communication": [r"\bcommunication\b", r"\bwritten communication\b"],
+    "Problem-Solving": [r"\bproblem solving\b", r"\bproblem-solving\b"],
+    "Collaboration": [r"\bcollaboration\b", r"\bteam player\b", r"\bteamwork\b"],
+    "Agile": [r"\bagile\b", r"\bscrum\b"],
+}
+
+
+class SkillGapRequest(BaseModel):
+    career_path: str
+    location: str
+    student_skills: List[str]
+    answers: Dict[str, Any] = {}
+
+
+def extract_skills_from_text(text: str) -> List[str]:
+    found = []
+    text_lower = text.lower()
+    for skill_name, patterns in SKILL_MAP.items():
+        for pattern in patterns:
+            if re.search(pattern, text_lower):
+                found.append(skill_name)
+                break
+    return found
+
+
+def fetch_jobs_for_skill_gap(query: str, location: str) -> List[Dict[str, Any]]:
+    jsearch_key = os.getenv("JSearch_api_key")
+    if not jsearch_key:
+        print("[JSearch] Key not configured. Using empty list.")
+        return []
+
+    full_query = f"{query} in {location}"
+    jobs_list = []
+    
+    try:
+        headers = {
+            "x-rapidapi-key": jsearch_key,
+            "x-rapidapi-host": "jsearch.p.rapidapi.com"
+        }
+        for page in range(1, 4):
+            params = {
+                "query": full_query,
+                "page": str(page),
+                "num_pages": "1",
+                "date_posted": "all"
+            }
+            res = requests.get("https://jsearch.p.rapidapi.com/search", headers=headers, params=params, timeout=12)
+            if res.status_code == 200:
+                data = res.json().get("data", [])
+                if not data:
+                    break
+                for j in data:
+                    title = j.get("job_title", "")
+                    company = j.get("employer_name", "")
+                    desc = j.get("job_description", "")
+                    apply_link = j.get("job_apply_link", "")
+                    
+                    if desc and not any(existing.get("title") == title and existing.get("company") == company for existing in jobs_list):
+                        jobs_list.append({
+                            "title": title,
+                            "company": company,
+                            "description": desc,
+                            "url": apply_link
+                        })
+            else:
+                print(f"[JSearch Skill Gap] Page {page} returned status {res.status_code}")
+                break
+    except Exception as e:
+        print(f"[JSearch Skill Gap] Exception during fetch: {e}")
+        
+    return jobs_list
+
+
+def get_gemini_skill_gap_insights(
+    career_path: str,
+    student_skills: List[str],
+    missing_skills: List[Dict[str, Any]],
+    top_skills: List[Dict[str, Any]],
+    api_key: str
+) -> Dict[str, Any]:
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="GEMINI_API_KEY is not set."
+        )
+
+    missing_str = ", ".join([f"{item['skill']} ({item['demand_pct']}% demand)" for item in missing_skills])
+    possessed_str = ", ".join(student_skills)
+    top_str = ", ".join([f"{item['skill']} ({item['demand_pct']}%)" for item in top_skills])
+
+    prompt = f"""You are a Career Architect and Technical Recruiter. Analyze this skill gap analysis data:
+- Target Career: {career_path}
+- Student Possessed Skills: {possessed_str}
+- Top Demanded Skills in Live Postings: {top_str}
+- Identified Missing Skills: {missing_str}
+
+Your tasks:
+1. For each missing skill, write a 1-sentence "industry_usage" explaining how employers use it, and estimate a realistic "learning_time" (e.g. "2-3 weeks", "1 month").
+2. Create a personalized learning roadmap divided into:
+   - "weekly" (1-4 weeks: focus on immediate critical gaps)
+   - "monthly" (1-3 months: focus on medium/high priority frameworks/libs)
+   - "quarterly" (3-6 months: long-term tools and deployment skills)
+   Each roadmap milestone should have a "milestone" title and a detailed "description".
+3. Write a "final_summary" covering:
+   - "strengths": Summary of current capabilities (strengths) based on possessed skills
+   - "weaknesses": Summary of current gaps (weaknesses) based on missing skills
+   - "priority_skills": Which missing skills are highest priority to study first based on demand
+   - "hiring_trends": Trends observed for these technologies in the market
+   - "next_actions": Recommended concrete next actions for the student
+
+Return ONLY a raw JSON object (no markdown formatting, no code fences) matching this exact schema:
+{{
+  "missing_skills_info": [
+    {{
+      "skill": "Skill Name",
+      "learning_time": "e.g. 2-3 weeks",
+      "usage": "e.g. Containerizing applications and maintaining identical production environments."
+    }}
+  ],
+  "roadmap": {{
+    "weekly": [
+      {{ "milestone": "Week 1-2: Title", "description": "What to study and build" }}
+    ],
+    "monthly": [
+      {{ "milestone": "Month 1: Title", "description": "What to study and build" }}
+    ],
+    "quarterly": [
+      {{ "milestone": "Quarter 1-2: Title", "description": "What to study and build" }}
+    ]
+  }},
+  "final_summary": {{
+    "strengths": "Summary of current capabilities",
+    "weaknesses": "Summary of gaps",
+    "priority_skills": "What they must prioritize",
+    "hiring_trends": "Hiring trends",
+    "next_actions": "Recommended next actions"
+  }}
+}}"""
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json"}
+    }
+
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=25)
+        res.raise_for_status()
+        data = res.json()
+        text_content = data["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text_content)
+    except Exception as e:
+        print(f"[Gemini Skill Gap] Error: {e}")
+        return {
+            "missing_skills_info": [
+                {
+                    "skill": m["skill"],
+                    "learning_time": "3-4 weeks" if m["importance"] == "Critical" else "2-3 weeks",
+                    "usage": f"Commonly required tool for {career_path} projects."
+                }
+                for m in missing_skills
+            ],
+            "roadmap": {
+                "weekly": [
+                    {
+                        "milestone": "Weeks 1-2: Focus on Critical Gaps",
+                        "description": "Establish basic familiarity with the most critical missing technologies."
+                    }
+                ],
+                "monthly": [
+                    {
+                        "milestone": "Month 1-2: Core Libraries & Integrations",
+                        "description": "Build functional projects integrating the newly learned skills."
+                    }
+                ],
+                "quarterly": [
+                    {
+                        "milestone": "Quarter 1: Advanced Frameworks",
+                        "description": "Optimize and deploy applications to test scalability."
+                    }
+                ]
+            },
+            "final_summary": {
+                "strengths": f"Demonstrates good foundational skills in: {possessed_str}.",
+                "weaknesses": "Missing key production deployment tooling required by modern employers.",
+                "priority_skills": "Prioritize critical skills showing over 70% job requirement rate.",
+                "hiring_trends": "Shift towards automated containerization and deployment frameworks.",
+                "next_actions": "Begin with the Weeks 1-2 milestones outlined in the roadmap tab."
+            }
+        }
+
+
+@app.post("/api/skill-gap")
+async def analyze_skill_gap(request: SkillGapRequest):
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    career = request.career_path
+    location = request.location
+    student_skills = request.student_skills
+    student_skills_normalized = [s.strip().lower() for s in student_skills]
+
+    # 1. Fetch live jobs with descriptions from JSearch
+    jobs_data = fetch_jobs_for_skill_gap(career, location)
+    if not jobs_data:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No live job postings could be found for '{career}' in '{location}'. Check your connection or location parameters."
+        )
+
+    total_jobs = len(jobs_data)
+    confidence_low = total_jobs < 15
+
+    # 2. Extract skills from postings
+    skill_counts = {}
+    for job in jobs_data:
+        job_skills = extract_skills_from_text(job["description"])
+        job["extracted_skills"] = job_skills
+        for skill in job_skills:
+            skill_counts[skill] = skill_counts.get(skill, 0) + 1
+
+    # Calculate frequencies and filter to >= 10% demand
+    market_skills_raw = []
+    for skill, count in skill_counts.items():
+        pct = round((count / total_jobs) * 100)
+        if pct >= 10:
+            importance = "Low"
+            if pct >= 70:
+                importance = "Critical"
+            elif pct >= 50:
+                importance = "High"
+            elif pct >= 30:
+                importance = "Medium"
+                
+            student_has = skill.lower() in student_skills_normalized
+            market_skills_raw.append({
+                "skill": skill,
+                "demand_pct": pct,
+                "jobs_count": count,
+                "importance": importance,
+                "student_has": student_has
+            })
+
+    # Sort descending by demand
+    market_skills_raw.sort(key=lambda x: x["demand_pct"], reverse=True)
+
+    # 3. Categorize possessed and missing skills
+    market_skills = market_skills_raw
+    top_10 = market_skills[:10]
+    
+    missing_skills = [
+        s for s in market_skills 
+        if not s["student_has"] and s["importance"] in ("Critical", "High", "Medium")
+    ]
+    
+    emerging_skills = [
+        s for s in market_skills 
+        if not s["student_has"] and s["importance"] == "Low"
+    ]
+
+    # 4. Calculate Scores
+    possessed_demanded = [s for s in market_skills if s["student_has"] and s["importance"] in ("Critical", "High", "Medium")]
+    total_demanded = [s for s in market_skills if s["importance"] in ("Critical", "High", "Medium")]
+    
+    skill_match_score = round((len(possessed_demanded) / len(total_demanded)) * 100) if total_demanded else 80
+    
+    cgpa = 8.0
+    try:
+        cgpa = float(request.answers.get("education", {}).get("cgpa", 8.0))
+    except Exception:
+        pass
+    
+    readiness_modifier = (cgpa / 10.0) * 10
+    career_readiness_score = min(100, max(30, round(skill_match_score * 0.85 + readiness_modifier)))
+
+    # 5. Career Impact Access Calculation
+    critical_high_skills = [s["skill"] for s in market_skills if s["importance"] in ("Critical", "High")]
+    
+    jobs_eligible_now = 0
+    for job in jobs_data:
+        req = job["extracted_skills"]
+        req_crit = [s for s in req if s in critical_high_skills]
+        if all(s.lower() in student_skills_normalized for s in req_crit):
+            jobs_eligible_now += 1
+            
+    base_pct = round((jobs_eligible_now / total_jobs) * 100) if total_jobs else 0
+
+    career_impact = []
+    missing_crit_high = [s for s in missing_skills if s["importance"] in ("Critical", "High")]
+    for m_skill in missing_crit_high:
+        jobs_eligible_after = 0
+        for job in jobs_data:
+            req = job["extracted_skills"]
+            req_crit = [s for s in req if s in critical_high_skills]
+            if all(s.lower() in student_skills_normalized or s == m_skill["skill"] for s in req_crit):
+                jobs_eligible_after += 1
+        after_pct = round((jobs_eligible_after / total_jobs) * 100) if total_jobs else 0
+        after_pct = max(after_pct, min(100, base_pct + 15))
+        career_impact.append({
+            "skill": m_skill["skill"],
+            "before_pct": base_pct,
+            "after_pct": after_pct
+        })
+
+    # 6. Ask Gemini for explanations and roadmaps
+    insights = get_gemini_skill_gap_insights(
+        career_path=career,
+        student_skills=student_skills,
+        missing_skills=missing_skills[:6],
+        top_skills=top_10,
+        api_key=gemini_key
+    )
+
+    insights_info = {item["skill"].lower(): item for item in insights.get("missing_skills_info", [])}
+    for m in missing_skills:
+        info = insights_info.get(m["skill"].lower())
+        m["learning_time"] = info["learning_time"] if info else "3-4 weeks"
+        m["usage"] = info["usage"] if info else "Commonly requested industry framework."
+
+    return {
+        "skill_match_score": skill_match_score,
+        "career_readiness_score": career_readiness_score,
+        "market_skills": market_skills,
+        "missing_skills": missing_skills,
+        "top_skills": [
+            {"rank": idx + 1, "skill": s["skill"], "demand_pct": s["demand_pct"]}
+            for idx, s in enumerate(top_10)
+        ],
+        "emerging_skills": [s["skill"] for s in emerging_skills[:5]],
+        "roadmap": insights.get("roadmap"),
+        "career_impact": career_impact,
+        "final_summary": insights.get("final_summary"),
+        "confidence_low": confidence_low,
+        "jobs_analyzed": total_jobs
+    }
 
 
 if __name__ == "__main__":
