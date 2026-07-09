@@ -685,6 +685,53 @@ Return ONLY a raw JSON object (no markdown formatting, no code fences) matching 
         }
 
 
+def generate_simulated_job_descriptions(career: str, location: str, api_key: str) -> List[Dict[str, Any]]:
+    if not api_key:
+        return []
+    
+    prompt = f"""Generate a list of 15 realistic job postings for the role of '{career}' in '{location}' as a JSON array.
+Each posting must include:
+- "title": A realistic job title (e.g. "Junior {career}", "Associate {career}")
+- "company": A fictional company name
+- "description": A detailed, realistic job description paragraph listing technical requirements, cloud platforms, databases, programming tools, and soft skills typical of what employers look for today in this role.
+
+Return ONLY a raw JSON array (no markdown code blocks, no formatting):
+[
+  {{
+    "title": "...",
+    "company": "...",
+    "description": "..."
+  }}
+]"""
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json"}
+    }
+    
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=20)
+        res.raise_for_status()
+        import json
+        return json.loads(res.json()["candidates"][0]["content"]["parts"][0]["text"])
+    except Exception as e:
+        print(f"[Simulated Jobs] Generation failed: {e}")
+        return [
+            {
+                "title": f"Junior {career}",
+                "company": "Enterprise Tech Solutions",
+                "description": f"We are looking for a Junior {career}. Strong skills in Python, SQL, Git, and Docker are highly preferred. Cloud familiarity (AWS) is a plus. Good problem solving skills."
+            },
+            {
+                "title": f"Associate {career}",
+                "company": "Global Innovators Group",
+                "description": f"Seeking a motivated Associate {career}. Must be proficient in SQL, Python, JavaScript, and Git. Experience with TensorFlow or Machine Learning is desirable."
+            }
+        ]
+
+
 @app.post("/api/skill-gap")
 async def analyze_skill_gap(request: SkillGapRequest):
     gemini_key = os.getenv("GEMINI_API_KEY")
@@ -695,14 +742,21 @@ async def analyze_skill_gap(request: SkillGapRequest):
 
     # 1. Fetch live jobs with descriptions from JSearch
     jobs_data = fetch_jobs_for_skill_gap(career, location)
+    
+    is_simulated = False
+    if not jobs_data:
+        print(f"[Skill Gap] Live fetch returned 0 jobs for '{career}' in '{location}'. Falling back to Gemini simulated job postings.")
+        jobs_data = generate_simulated_job_descriptions(career, location, gemini_key)
+        is_simulated = True
+
     if not jobs_data:
         raise HTTPException(
-            status_code=400,
-            detail=f"No live job postings could be found for '{career}' in '{location}'. Check your connection or location parameters."
+            status_code=500,
+            detail="Failed to retrieve live postings or generate simulated descriptions. Please check your credentials."
         )
 
     total_jobs = len(jobs_data)
-    confidence_low = total_jobs < 15
+    confidence_low = (total_jobs < 15) or is_simulated
 
     # 2. Extract skills from postings
     skill_counts = {}
@@ -824,7 +878,8 @@ async def analyze_skill_gap(request: SkillGapRequest):
         "career_impact": career_impact,
         "final_summary": insights.get("final_summary"),
         "confidence_low": confidence_low,
-        "jobs_analyzed": total_jobs
+        "jobs_analyzed": total_jobs,
+        "is_simulated": is_simulated
     }
 
 
