@@ -21,8 +21,6 @@ export function SkillGapAnalyzer({ analysis, answers }) {
   const recommendedPaths = analysis?.careerPaths || [];
   
   const [selectedPath, setSelectedPath] = useState(recommendedPaths[0]?.title || "");
-  const [city, setCity] = useState(answers?.basicInfo?.city || "");
-  const [country, setCountry] = useState(answers?.basicInfo?.country || "India");
   const [studentSkillsText, setStudentSkillsText] = useState(
     answers?.strengthsInterests?.primaryStrength
       ? `${answers.strengthsInterests.primaryStrength}, ${answers.strengthsInterests.energizingTasks || ""}`
@@ -34,18 +32,16 @@ export function SkillGapAnalyzer({ analysis, answers }) {
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
   const [activeRoadmapTab, setActiveRoadmapTab] = useState("weekly");
-
+ 
   // Reset results if the user changes any input parameter
   useEffect(() => {
     setResults(null);
     setError(null);
-  }, [selectedPath, city, country, studentSkillsText]);
-
+  }, [selectedPath, studentSkillsText]);
+ 
   // Reset inputs and results if the user changes the questionnaire answers or recommendations
   useEffect(() => {
     setSelectedPath(recommendedPaths[0]?.title || "");
-    setCity(answers?.basicInfo?.city || "");
-    setCountry(answers?.basicInfo?.country || "India");
     setStudentSkillsText(
       answers?.strengthsInterests?.primaryStrength
         ? `${answers.strengthsInterests.primaryStrength}, ${answers.strengthsInterests.energizingTasks || ""}`
@@ -84,7 +80,7 @@ export function SkillGapAnalyzer({ analysis, answers }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           career_path: selectedPath,
-          location: city ? `${city}, ${country}` : country,
+          location: "",
           student_skills: skillsArray,
           answers: answers || {}
         })
@@ -154,7 +150,7 @@ export function SkillGapAnalyzer({ analysis, answers }) {
           </p>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 items-end">
+        <div className="grid gap-4 sm:grid-cols-[1fr_240px] items-end">
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-muted-foreground block">Target Career Path</label>
             <input
@@ -174,28 +170,6 @@ export function SkillGapAnalyzer({ analysis, answers }) {
               <option value="Cloud Engineer" />
               <option value="Data Scientist" />
             </datalist>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-muted-foreground block">Preferred City / Region</label>
-            <input
-              type="text"
-              value={city}
-              onChange={(e) => setCity(e.target.value)}
-              placeholder="e.g. Bangalore, Manila, remote"
-              className="w-full rounded-xl border border-border bg-background px-4 py-3 text-xs outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary focus:ring-2 focus:ring-primary/20 text-foreground"
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-muted-foreground block">Preferred Country</label>
-            <input
-              type="text"
-              value={country}
-              onChange={(e) => setCountry(e.target.value)}
-              placeholder="e.g. India, Philippines"
-              className="w-full rounded-xl border border-border bg-background px-4 py-3 text-xs outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary focus:ring-2 focus:ring-primary/20 text-foreground"
-            />
           </div>
 
           <div>
@@ -287,7 +261,7 @@ export function SkillGapAnalyzer({ analysis, answers }) {
               <Sparkles className="h-4.5 w-4.5 shrink-0 mt-0.5" />
               <div className="space-y-0.5">
                 <span className="font-semibold block">Live Market Fetch Offline (Simulated Output)</span>
-                <span>The live job search returned 0 postings (likely due to subscription limits or region matching). We have simulated a set of 15 current job postings for '{selectedPath}' in '{city || country}' using AI models to complete the gap analysis successfully.</span>
+                <span>The live job search returned 0 postings (likely due to subscription limits). We have simulated a set of 15 current job postings for '{selectedPath}' using AI models to complete the gap analysis successfully.</span>
               </div>
             </div>
           ) : results.confidence_low && (
@@ -306,7 +280,7 @@ export function SkillGapAnalyzer({ analysis, answers }) {
               <div className="space-y-1">
                 <h4 className="text-md font-bold text-foreground">Real-Time Labor Market Summary</h4>
                 <p className="text-xs text-muted-foreground">
-                  Frequencies calculated directly from **{results.jobs_analyzed}** active job descriptions in **{city || country}** for **{selectedPath}**.
+                  Frequencies calculated directly from **{results.jobs_analyzed}** active job descriptions for **{selectedPath}**.
                 </p>
               </div>
               <div className="grid grid-cols-2 gap-4">

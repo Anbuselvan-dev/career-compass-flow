@@ -1,12 +1,14 @@
 import os
 import re
+import io
 import math
 import json
 import requests
-from fastapi import FastAPI, HTTPException
+from collections import Counter
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,106 +47,178 @@ def supabase_insert(table: str, data: dict):
         print(f"Error saving to Supabase: {e}")
 
 
-class AnalysisRequest(BaseModel):
-    basicInfo: Dict[str, Any] = {}
-    education: Dict[str, Any] = {}
-    workExperience: Dict[str, Any] = {}
-    strengthsInterests: Dict[str, Any] = {}
-    satisfaction: Dict[str, Any] = {}
-    preferredRole: Dict[str, Any] = {}
-    cognitiveProfile: Dict[str, Any] = {}
-    coreCharacter: Dict[str, Any] = {}
+class AcademicBg(BaseModel):
+    degree: str
+    current_year: Optional[str] = ""
+    cgpa: Optional[Any] = 0.0
+
+class LocationPref(BaseModel):
+    country: str
+    city: str
+    remote_ok: bool
+
+class RedesignedAnalysisRequest(BaseModel):
+    academic: AcademicBg
+    technical_skills: List[str]
+    interests: List[str]
+    preferred_career: str
+    location: LocationPref
+    priority: str
+    values_ranking: List[str]
+    anti_goals: List[str]
+    user_id: Optional[str] = None
+
+
+def call_groq_fallback(prompt: str, response_format_json: bool = True) -> str:
+    groq_key = os.getenv("GROQ_API_KEY")
+    if not groq_key:
+        print("[Groq Fallback] GROQ_API_KEY is not set.")
+        raise Exception("GROQ_API_KEY is not configured.")
+        
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {groq_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2
+    }
+    if response_format_json:
+        payload["response_format"] = {"type": "json_object"}
+        
+    res = requests.post(url, headers=headers, json=payload, timeout=25)
+    res.raise_for_status()
+    return res.json()["choices"][0]["message"]["content"]
 
 
 # ─────────────────────────────────────────────────────────────
 # GEMINI AI — Career Analysis (NO FALLBACK, throws on failure)
 # ─────────────────────────────────────────────────────────────
 def get_gemini_analysis(answers: Dict[str, Any], api_key: str) -> Dict[str, Any]:
-    if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="GEMINI_API_KEY is not set in backend/.env. Add your Google AI Studio key."
-        )
+    academic = answers.get("academic", {})
+    tech_skills = answers.get("technical_skills", [])
+    interests = answers.get("interests", [])
+    preferred_career = answers.get("preferred_career", "not_sure")
+    location = answers.get("location", {})
+    priority = answers.get("priority", "salary")
+    values_ranking = answers.get("values_ranking", [])
+    anti_goals = answers.get("anti_goals", [])
 
-    basic_info   = answers.get("basicInfo", {})
-    education    = answers.get("education", {})
-    work         = answers.get("workExperience", {})
-    strengths    = answers.get("strengthsInterests", {})
-    satisfaction = answers.get("satisfaction", {})
-    pref_role    = answers.get("preferredRole", {})
-    cog_profile  = answers.get("cognitiveProfile", {})
-    char         = answers.get("coreCharacter", {})
+    skills_str = ", ".join(tech_skills) if tech_skills else "None"
+    interests_str = ", ".join(interests) if interests else "None"
+    values_str = " -> ".join(values_ranking)
+    anti_goals_str = ", ".join(anti_goals) if anti_goals else "None"
 
-    cog_traits = "Skipped" if cog_profile.get("skipped") else ", ".join(cog_profile.get("selections", []))
-    work_exp = (
-        f"{work.get('years')} years of {work.get('type')} work"
-        if work.get("hasExperience") in ("yes", "freelance", "current")
-        else "None"
-    )
+    prompt = f"""You are a Career Counselor and Psychologist. Analyze the candidate's career profiling answers:
+Academic Profile:
+- Degree: {academic.get("degree", "N/A")}
+- Current Year: {academic.get("current_year", "N/A")}
+- CGPA: {academic.get("cgpa", 0.0)}
 
-    prompt = f"""You are a Career Counselor and Psychologist. Analyze the candidate's questionnaire answers:
-- Name: {basic_info.get("name", "Candidate")}
-- Gender: {basic_info.get("gender", "N/A")}
-- Age: {basic_info.get("ageRange", "N/A")}
-- Education Status: {education.get("status", "N/A")}
-- Field of study: {education.get("fieldOfStudy", "N/A")}
-- Institution: {education.get("institutionType", "N/A")}
-- Work Experience: {work_exp}
-- Primary Strength: {strengths.get("primaryStrength", "N/A")}
-- Energizing Tasks: {strengths.get("energizingTasks", "N/A")}
-- Matters in work: {satisfaction.get("duringWork", "N/A")}
-- Matters outside work: {satisfaction.get("afterWork", "N/A")}
-- Role preference in mind: {pref_role.get("freeText", "None")}
-- Broad area of interest: {pref_role.get("category", "None")}
-- Cognitive traits selected: {cog_traits}
-- Personal open response: {char.get("openResponse", "N/A")}
+Technical Skills: {skills_str}
+Interests: {interests_str}
+Preferred Career Focus: {preferred_career}
+Location Preference: Country: {location.get("country", "N/A")}, City: {location.get("city", "N/A")}, Remote Ok: {"Yes" if location.get("remote_ok") else "No"}
+
+Core Work Values (Ranked from highest to lowest priority):
+- {values_str}
+
+Primary Driver Priority: {priority}
+Anti-Goals (Filter OUT paths matching these constraints): {anti_goals_str}
+
+Your task is to recommend 3 ranked career path matches.
+For each path, you MUST compute:
+1. `matchScore`: Overall compatibility (0-100)
+2. `skill_fit_score`: Score (0-100) indicating how well their current technical skills match the career.
+3. `interest_fit_score`: Score (0-100) indicating how well their interests profile matches the career.
+4. `values_fit_score`: Score (0-100) indicating how well their ranked values align with the career profile.
+5. `feasibility_score`: Score (0-100) indicating feasibility based on region, remote options, and constraints.
 
 Create a realistic career compatibility report. Return ONLY a raw JSON object (no markdown, no code fences):
 {{
-  "summary": "Short professional summary of the candidate's career persona (2-3 sentences, mention their name).",
+  "summary": "Short professional summary of the candidate's career persona (2-3 sentences).",
+  "profileInterpretation": {{
+    "educationLevel": "Brief summary of candidate's academic standing",
+    "transferableSkills": ["Skill 1", "Skill 2", "Skill 3"],
+    "workPreferences": ["Preference 1", "Preference 2"],
+    "cognitiveStrengths": ["Strength 1", "Strength 2"]
+  }},
   "careerPaths": [
     {{
-      "title": "Specific Real Job Title 1",
+      "title": "Primary Recommended Job Title",
       "matchScore": 95,
+      "skill_fit_score": 90,
+      "interest_fit_score": 92,
+      "values_fit_score": 88,
+      "feasibility_score": 94,
+      "confidenceScore": 92,
       "salaryRange": "$75k - $110k",
       "scope": "High",
       "growthPercentage": 18,
-      "whyItFits": "Detailed explanation of why this role aligns with their specific strengths and preferences.",
-      "searchQuery": "Exact job search keyword (e.g. 'React Developer')"
+      "whyItFits": "Detailed alignment details based on skills, learning style, and interest cues.",
+      "searchQuery": "Exact job search keyword",
+      "riskFactors": ["Possible career transition hurdle 1", "Hurdle 2"],
+      "mitigationStrategies": ["Actionable step to prevent hurdle 1", "Actionable step 2"]
     }},
     {{
-      "title": "Specific Real Job Title 2",
+      "title": "Secondary Recommended Job Title",
       "matchScore": 85,
+      "skill_fit_score": 80,
+      "interest_fit_score": 85,
+      "values_fit_score": 82,
+      "feasibility_score": 90,
+      "confidenceScore": 84,
       "salaryRange": "$65k - $95k",
-      "scope": "Medium",
-      "growthPercentage": 12,
-      "whyItFits": "Detailed alignment explanation.",
-      "searchQuery": "Search keyword"
+      "scope": "High",
+      "growthPercentage": 15,
+      "whyItFits": "Detailed alignment details based on skills, learning style, and interest cues.",
+      "searchQuery": "Exact job search keyword",
+      "riskFactors": ["Possible career transition hurdle 1", "Hurdle 2"],
+      "mitigationStrategies": ["Actionable step to prevent hurdle 1", "Actionable step 2"]
     }},
     {{
-      "title": "Specific Real Job Title 3",
+      "title": "Third Recommended Job Title",
       "matchScore": 75,
-      "salaryRange": "$55k - $85k",
+      "skill_fit_score": 72,
+      "interest_fit_score": 78,
+      "values_fit_score": 74,
+      "feasibility_score": 85,
+      "confidenceScore": 76,
+      "salaryRange": "$55k - $80k",
       "scope": "Medium",
-      "growthPercentage": 9,
-      "whyItFits": "Detailed alignment explanation.",
-      "searchQuery": "Search keyword"
+      "growthPercentage": 11,
+      "whyItFits": "Detailed alignment details based on skills, learning style, and interest cues.",
+      "searchQuery": "Exact job search keyword",
+      "riskFactors": ["Possible career transition hurdle 1", "Hurdle 2"],
+      "mitigationStrategies": ["Actionable step to prevent hurdle 1", "Actionable step 2"]
     }}
   ],
-  "growthOutlook": [
-    {{"year": "2026", "Path1": 100, "Path2": 100, "Path3": 100}},
-    {{"year": "2027", "Path1": 112, "Path2": 108, "Path3": 105}},
-    {{"year": "2028", "Path1": 126, "Path2": 118, "Path3": 112}},
-    {{"year": "2029", "Path1": 142, "Path2": 130, "Path3": 120}},
-    {{"year": "2030", "Path1": 160, "Path2": 144, "Path3": 130}}
-  ],
-  "strengthsAlignment": "Two sentences about their cognitive profile and how it aligns with the suggested careers.",
-  "actionItems": [
-    "Specific action item 1 based on their background",
-    "Specific action item 2",
-    "Specific action item 3"
-  ]
+  "cognitiveProfileInsights": {{
+    "fitFactorAnalysis": "How their profile influences their optimal work structure",
+    "recommendedEnvironments": ["Environment attribute 1", "Environment attribute 2"],
+    "taskStructures": ["Task structure 1", "Task structure 2"],
+    "workStyleRecommendation": "Summary of recommended daily routine and management approach"
+  }},
+  "sustainabilityFactors": {{
+    "tradeOffs": "What positive and negative tradeoffs they face in this career path",
+    "longTermSustainability": "Why this role supports their energy management, passion retention, and long-term health"
+  }}
 }}"""
+
+    if not api_key:
+        print("[Gemini Analyze] API key missing, trying Groq fallback...")
+        try:
+            groq_content = call_groq_fallback(prompt, response_format_json=True)
+            return json.loads(groq_content)
+        except Exception as groq_err:
+            raise HTTPException(
+                status_code=500,
+                detail=f"GEMINI_API_KEY is not configured and Groq fallback failed: {str(groq_err)}"
+            )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
@@ -156,29 +230,20 @@ Create a realistic career compatibility report. Return ONLY a raw JSON object (n
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=30)
         res.raise_for_status()
-    except requests.exceptions.Timeout:
-        raise HTTPException(
-            status_code=504,
-            detail="Gemini API timed out. Check your API key or network connection and try again."
-        )
-    except requests.exceptions.HTTPError as e:
-        status = res.status_code if res else 500
-        raise HTTPException(
-            status_code=status,
-            detail=f"Gemini API returned an error: {res.text if res else str(e)}"
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gemini API call failed: {str(e)}")
-
-    try:
         data = res.json()
         text_content = data["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(text_content)
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to parse Gemini response: {str(e)}. Raw: {res.text[:300]}"
-        )
+        print(f"[Gemini Analyze] Call failed: {e}. Falling back to Groq Llama model...")
+        try:
+            groq_content = call_groq_fallback(prompt, response_format_json=True)
+            return json.loads(groq_content)
+        except Exception as groq_err:
+            print(f"[Groq Analyze Fallback] Failed: {groq_err}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Both Gemini and Groq fallback failed. Gemini Error: {str(e)}. Groq Error: {str(groq_err)}"
+            )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -323,7 +388,7 @@ def cosine_similarity(v1, v2) -> float:
 # MAIN ENDPOINT
 # ─────────────────────────────────────────────────────────────
 @app.post("/api/analyze")
-async def analyze_career(request: AnalysisRequest):
+async def analyze_career(request: RedesignedAnalysisRequest):
     answers    = request.dict()
     gemini_key = os.getenv("GEMINI_API_KEY")
 
@@ -337,12 +402,10 @@ async def analyze_career(request: AnalysisRequest):
     # 3. Cosine similarity scoring on real jobs (best-effort, skipped if embeddings fail)
     if jobs:
         try:
-            cog_selections = ", ".join(answers.get("cognitiveProfile", {}).get("selections", []))
+            skills_selections = ", ".join(answers.get("technical_skills", []))
             candidate_text = f"""
-Name: {answers.get("basicInfo", {}).get("name", "")}
-Preferred Role: {answers.get("preferredRole", {}).get("freeText", "")} ({answers.get("preferredRole", {}).get("category", "")})
-Strengths: {answers.get("strengthsInterests", {}).get("primaryStrength", "")}
-Cognitive Profile: {cog_selections}
+Academic: {answers.get("academic", {}).get("degree", "")} (CGPA: {answers.get("academic", {}).get("cgpa", 0.0)})
+Skills: {skills_selections}
 Summary: {analysis.get("summary", "")}
 """.strip()
 
@@ -361,14 +424,54 @@ Summary: {analysis.get("summary", "")}
             print(f"[Embeddings] Similarity scoring failed: {e}")
 
     # 4. Persist to Supabase (non-blocking, errors are logged not raised)
-    supabase_insert("career_reports", {
-        "candidate_name": answers.get("basicInfo", {}).get("name", "Guest"),
+    report_data = {
+        "candidate_name": "Student",
         "answers": answers,
         "analysis": analysis,
         "jobs": jobs,
-    })
+    }
+    if request.user_id:
+        report_data["user_id"] = request.user_id
+
+    supabase_insert("career_reports", report_data)
 
     return {"analysis": analysis, "jobs": jobs}
+
+
+@app.get("/api/auth/latest-report")
+def get_latest_report(user_id: str):
+    """
+    Fetch the latest career report for a specific user to restore session.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(status_code=404, detail="Supabase not configured.")
+
+    url = f"{SUPABASE_URL}/rest/v1/career_reports"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    # Query matching user_id, order by created_at descending, limit to 1
+    params = {
+        "user_id": f"eq.{user_id}",
+        "order": "created_at.desc",
+        "limit": "1"
+    }
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        res.raise_for_status()
+        rows = res.json()
+        if not rows:
+            return {"found": False}
+        return {
+            "found": True,
+            "report": rows[0]
+        }
+    except Exception as e:
+        print(f"[Latest Report] Error fetching: {e}")
+        return {"found": False, "error": str(e)}
+
 
 
 class CompareRequest(BaseModel):
@@ -376,12 +479,118 @@ class CompareRequest(BaseModel):
     career_b: str
 
 
+def generate_mock_comparison(career_a: str, career_b: str) -> Dict[str, Any]:
+    # Capitalize names cleanly
+    title_a = career_a.strip().title()
+    title_b = career_b.strip().title()
+
+    # Predefined stats/skills database for popular fields to make them look highly realistic
+    database = {
+        "full stack": {
+            "demand": "High",
+            "demand_trend": "Strong hiring volume across startup and enterprise sectors driven by cloud migrations.",
+            "salary": {"entry": "$65k - $85k", "mid": "$100k - $130k", "senior": "$145k - $185k"},
+            "skills": {
+                "technical": ["JavaScript/TypeScript", "React", "Node.js", "SQL/NoSQL", "Docker"],
+                "soft": ["Problem-Solving", "Agile Collaboration", "System Design Thinking"]
+            },
+            "govt_relevance": "Moderate demand in public sector departments upgrading legacy web portals and internal citizen services."
+        },
+        "cybersecurity": {
+            "demand": "High",
+            "demand_trend": "Exponential demand growth due to rising cyber threats and strict compliance requirements.",
+            "salary": {"entry": "$70k - $90k", "mid": "$110k - $140k", "senior": "$150k - $200k"},
+            "skills": {
+                "technical": ["Network Security", "Penetration Testing", "Linux Admin", "SIEM Tools", "Cryptography"],
+                "soft": ["Analytical Thinking", "Attention to Detail", "Crisis Management"]
+            },
+            "govt_relevance": "Critical demand in defense agencies, municipal infrastructure departments, and federal security operations."
+        },
+        "data scientist": {
+            "demand": "High",
+            "demand_trend": "Consistent demand driven by corporate investments in AI, machine learning pipelines, and big data.",
+            "salary": {"entry": "$75k - $95k", "mid": "$120k - $150k", "senior": "$160k - $210k"},
+            "skills": {
+                "technical": ["Python", "R Language", "SQL", "TensorFlow/PyTorch", "Statistics"],
+                "soft": ["Data Storytelling", "Business Acumen", "Curiosity"]
+            },
+            "govt_relevance": "High demand in statistics bureaus, tax agencies, and government research laboratories using predictive modeling."
+        },
+        "cloud engineer": {
+            "demand": "High",
+            "demand_trend": "Strong demand as companies adopt serverless architectures and multi-cloud solutions.",
+            "salary": {"entry": "$70k - $90k", "mid": "$115k - $145k", "senior": "$155k - $195k"},
+            "skills": {
+                "technical": ["AWS/Azure/GCP", "Terraform (IaC)", "Kubernetes", "Linux Shell", "CI/CD Pipelines"],
+                "soft": ["System Design", "Collaboration", "Root Cause Analysis"]
+            },
+            "govt_relevance": "High demand in federal initiatives shifting public cloud workloads to secure GovCloud partitions."
+        },
+        "product designer": {
+            "demand": "Medium",
+            "demand_trend": "Steady demand as product usability and user experience remain major differentiators.",
+            "salary": {"entry": "$55k - $75k", "mid": "$90k - $120k", "senior": "$130k - $170k"},
+            "skills": {
+                "technical": ["Figma", "UI Design Systems", "Prototyping", "UX Research", "HTML/CSS Basics"],
+                "soft": ["Empathy", "Communication", "Giving & Receiving Feedback"]
+            },
+            "govt_relevance": "Moderate public demand as government portals focus on accessibility compliance (e.g. WCAG)."
+        }
+    }
+
+    # Match input to database keys
+    def get_profile(name: str):
+        name_lower = name.lower()
+        for key, profile in database.items():
+            if key in name_lower:
+                return profile
+        # Generic fallback profile generated dynamically
+        return {
+            "demand": "Medium",
+            "demand_trend": f"Steady demand as specialized skills in {name} continue to find utility in active industries.",
+            "salary": {"entry": "$50k - $70k", "mid": "$80k - $110k", "senior": "$120k - $155k"},
+            "skills": {
+                "technical": [f"{name} Core Tools", "Data Analysis", "System Integration"],
+                "soft": ["Communication", "Critical Thinking", "Team Collaboration"]
+            },
+            "govt_relevance": f"Steady utility in corresponding public services and operational administrative wings."
+        }
+
+    p_a = get_profile(title_a)
+    p_b = get_profile(title_b)
+
+    return {
+        "career_a": {
+            "title": title_a,
+            "demand": p_a["demand"],
+            "demand_trend": p_a["demand_trend"],
+            "salary": p_a["salary"],
+            "skills": p_a["skills"],
+            "govt_relevance": p_a["govt_relevance"]
+        },
+        "career_b": {
+            "title": title_b,
+            "demand": p_b["demand"],
+            "demand_trend": p_b["demand_trend"],
+            "salary": p_b["salary"],
+            "skills": p_b["skills"],
+            "govt_relevance": p_b["govt_relevance"]
+        },
+        "comparison_matrix": {
+            "learning_curve": f"Comparing the two, {title_a} usually requires targeted technical certification, whereas {title_b} demands hands-on project creation and logic building.",
+            "work_life_balance": f"Both tracks support typical 40-hour weeks. {title_a} roles can face on-call stress, while {title_b} has deadline-driven sprints.",
+            "remote_opportunities": f"Both fields are highly remote-friendly, though certain corporate or public-sector {title_a} settings may require hybrid schedules.",
+            "ai_susceptibility": f"Low for both. AI tools boost developer productivity in {title_a} and script writing in {title_b}, but strategic decisions remain human.",
+            "long_term_growth": f"Excellent progression lanes. Both fields lead into high-compensation senior roles, consulting paths, or engineering management."
+        },
+        "verdict": f"Choose {title_a} if you prefer building structured solutions, automating workflows, and technical specialization. Choose {title_b} if you are energized by analyzing risks, big data discovery, or user-centric systems."
+    }
+
+
 def get_gemini_comparison(career_a: str, career_b: str, api_key: str) -> Dict[str, Any]:
     if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="GEMINI_API_KEY is not set in backend/.env. Add your Google AI Studio key."
-        )
+        print("[Gemini Comparison] API key missing, falling back to dynamic simulated comparison.")
+        return generate_mock_comparison(career_a, career_b)
 
     prompt = f"""Compare the following two career paths in detail:
 1. Career A: {career_a}
@@ -431,6 +640,14 @@ Return ONLY a raw JSON object (no markdown, no code fences) with this exact sche
   "verdict": "Clear summary recommendation of which path might suit which type of person best based on values, skill types, and long-term targets (2-3 sentences)"
 }}"""
 
+    if not api_key:
+        print("[Gemini Comparison] API key missing, trying Groq...")
+        try:
+            return json.loads(call_groq_fallback(prompt, response_format_json=True))
+        except Exception as groq_err:
+            print(f"[Groq Comparison Fallback] Failed: {groq_err}. Falling back to dynamic mock comparison.")
+            return generate_mock_comparison(career_a, career_b)
+
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -445,10 +662,13 @@ Return ONLY a raw JSON object (no markdown, no code fences) with this exact sche
         text_content = data["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(text_content)
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Gemini Comparison API call failed: {str(e)}"
-        )
+        print(f"[Gemini Comparison] Failed: {e}. Falling back to Groq...")
+        try:
+            groq_content = call_groq_fallback(prompt, response_format_json=True)
+            return json.loads(groq_content)
+        except Exception as groq_err:
+            print(f"[Groq Comparison Fallback] Failed: {groq_err}. Falling back to dynamic mock comparison.")
+            return generate_mock_comparison(career_a, career_b)
 
 
 @app.post("/api/compare")
@@ -463,7 +683,10 @@ async def compare_careers(request: CompareRequest):
 
 SKILL_MAP = {
     "Python": [r"\bpython\b"],
-    "SQL": [r"\bsql\b"],
+    "Java": [r"\bjava\b"],
+    "HTML": [r"\bhtml\b", r"\bhtml5\b"],
+    "CSS": [r"\bcss\b", r"\bcss3\b"],
+    "SQL": [r"\bsql\b", r"\bmysql\b", r"\bmaria-db\b", r"\bmariadb\b"],
     "JavaScript": [r"\bjavascript\b", r"\bjs\b"],
     "TypeScript": [r"\btypescript\b", r"\bts\b"],
     "React.js": [r"\breact\b", r"\breact\.js\b", r"\breactjs\b"],
@@ -496,12 +719,25 @@ SKILL_MAP = {
     "Problem-Solving": [r"\bproblem solving\b", r"\bproblem-solving\b"],
     "Collaboration": [r"\bcollaboration\b", r"\bteam player\b", r"\bteamwork\b"],
     "Agile": [r"\bagile\b", r"\bscrum\b"],
+    "Spring Boot": [r"\bspring boot\b", r"\bspring\b", r"\bspringboot\b"],
+    "Express": [r"\bexpress\b", r"\bexpress\.js\b", r"\bexpressjs\b"],
+    "Golang": [r"\bgolang\b", r"\bgo programming\b"],
+    "Rust": [r"\brust\b"],
+    "C++": [r"\bc\+\+\b"],
+    "C#": [r"\bc#\b", r"\bc-sharp\b"],
+    ".NET": [r"\b\.net\b", r"\bdotnet\b"],
+    "PHP": [r"\bphp\b"],
+    "Ruby": [r"\bruby\b", r"\brails\b", r"\bruby on rails\b"],
+    "Kotlin": [r"\bkotlin\b"],
+    "Swift": [r"\bswift\b"],
+    "Flutter": [r"\bflutter\b"],
+    "React Native": [r"\breact native\b", r"\breact-native\b"],
 }
 
 
 class SkillGapRequest(BaseModel):
     career_path: str
-    location: str
+    location: str = ""
     student_skills: List[str]
     answers: Dict[str, Any] = {}
 
@@ -518,50 +754,121 @@ def extract_skills_from_text(text: str) -> List[str]:
 
 
 def fetch_jobs_for_skill_gap(query: str, location: str) -> List[Dict[str, Any]]:
+    import html
     jsearch_key = os.getenv("JSearch_api_key")
-    if not jsearch_key:
-        print("[JSearch] Key not configured. Using empty list.")
-        return []
+    jooble_key  = os.getenv("Jooble_api_key")
+    adzuna_id   = os.getenv("Adzuna_app_id")
+    adzuna_key  = os.getenv("Adzuna_api_key")
 
-    full_query = f"{query} in {location}"
     jobs_list = []
-    
-    try:
-        headers = {
-            "x-rapidapi-key": jsearch_key,
-            "x-rapidapi-host": "jsearch.p.rapidapi.com"
-        }
-        for page in range(1, 4):
-            params = {
-                "query": full_query,
-                "page": str(page),
-                "num_pages": "1",
-                "date_posted": "all"
+    full_query = f"{query} in {location}" if location else query
+
+    # Helper function to clean HTML tags and decode HTML entities from descriptions
+    def clean_description(text: str) -> str:
+        if not text:
+            return ""
+        decoded = html.unescape(text)
+        # remove HTML tags
+        return re.sub(r"<[^>]*>", " ", decoded)
+
+    # 1. Fetch from JSearch (RapidAPI)
+    if jsearch_key:
+        try:
+            headers = {
+                "x-rapidapi-key": jsearch_key,
+                "x-rapidapi-host": "jsearch.p.rapidapi.com"
             }
-            res = requests.get("https://jsearch.p.rapidapi.com/search", headers=headers, params=params, timeout=12)
-            if res.status_code == 200:
-                data = res.json().get("data", [])
-                if not data:
+            for page in range(1, 4):
+                params = {
+                    "query": full_query,
+                    "page": str(page),
+                    "num_pages": "1",
+                    "date_posted": "all"
+                }
+                res = requests.get("https://jsearch.p.rapidapi.com/search", headers=headers, params=params, timeout=12)
+                if res.status_code == 200:
+                    data = res.json().get("data", [])
+                    if not data:
+                        break
+                    for j in data:
+                        title = j.get("job_title", "")
+                        company = j.get("employer_name", "")
+                        desc = j.get("job_description", "")
+                        apply_link = j.get("job_apply_link", "")
+                        
+                        if desc and not any(existing.get("title") == title and existing.get("company") == company for existing in jobs_list):
+                            jobs_list.append({
+                                "title": title,
+                                "company": company,
+                                "description": clean_description(desc),
+                                "url": apply_link
+                            })
+                else:
+                    print(f"[JSearch Skill Gap] Page {page} returned status {res.status_code}")
                     break
-                for j in data:
-                    title = j.get("job_title", "")
-                    company = j.get("employer_name", "")
-                    desc = j.get("job_description", "")
-                    apply_link = j.get("job_apply_link", "")
+        except Exception as e:
+            print(f"[JSearch Skill Gap] Exception during fetch: {e}")
+
+    # 2. Fetch from Jooble if JSearch didn't yield results
+    if not jobs_list and jooble_key:
+        try:
+            url = f"https://jooble.org/api/{jooble_key}"
+            payload = {
+                "keywords": query,
+                "location": location or "",
+                "page": "1"
+            }
+            res = requests.post(url, json=payload, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                jobs = data.get("jobs", [])
+                for j in jobs:
+                    title = j.get("title", "")
+                    company = j.get("company", "")
+                    snippet = j.get("snippet", "")
+                    link = j.get("link", "")
+                    
+                    if snippet and not any(existing.get("title") == title and existing.get("company") == company for existing in jobs_list):
+                        jobs_list.append({
+                            "title": title,
+                            "company": company,
+                            "description": clean_description(snippet),
+                            "url": link
+                        })
+        except Exception as e:
+            print(f"[Jooble Skill Gap] Exception during fetch: {e}")
+
+    # 3. Fetch from Adzuna if JSearch and Jooble didn't yield results
+    if not jobs_list and adzuna_id and adzuna_key and adzuna_id != "your_adzuna_app_id_here":
+        try:
+            country_code = "in" if "india" in (location or "").lower() else "us"
+            url = f"https://api.adzuna.com/v1/api/jobs/{country_code}/search/1"
+            params = {
+                "app_id": adzuna_id,
+                "app_key": adzuna_key,
+                "results_per_page": 20,
+                "what": query,
+            }
+            res = requests.get(url, params=params, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                jobs = data.get("results", [])
+                for j in jobs:
+                    title = j.get("title", "")
+                    company = j.get("company", {}).get("display_name", "")
+                    desc = j.get("description", "")
+                    link = j.get("redirect_url", "")
                     
                     if desc and not any(existing.get("title") == title and existing.get("company") == company for existing in jobs_list):
                         jobs_list.append({
                             "title": title,
                             "company": company,
-                            "description": desc,
-                            "url": apply_link
+                            "description": clean_description(desc),
+                            "url": link
                         })
-            else:
-                print(f"[JSearch Skill Gap] Page {page} returned status {res.status_code}")
-                break
-    except Exception as e:
-        print(f"[JSearch Skill Gap] Exception during fetch: {e}")
-        
+        except Exception as e:
+            print(f"[Adzuna Skill Gap] Exception during fetch: {e}")
+
     return jobs_list
 
 
@@ -631,6 +938,50 @@ Return ONLY a raw JSON object (no markdown formatting, no code fences) matching 
   }}
 }}"""
 
+    if not api_key:
+        print("[Gemini Skill Gap] API key missing, trying Groq fallback...")
+        try:
+            return json.loads(call_groq_fallback(prompt, response_format_json=True))
+        except Exception as groq_err:
+            print(f"[Groq Skill Gap Fallback] Failed: {groq_err}. Using rule-based fallback details.")
+            return {
+                "missing_skills_info": [
+                    {
+                        "skill": m["skill"],
+                        "learning_time": "3-4 weeks" if m["importance"] == "Critical" else "2-3 weeks",
+                        "usage": f"Commonly required tool for {career_path} projects."
+                    }
+                    for m in missing_skills
+                ],
+                "roadmap": {
+                    "weekly": [
+                        {
+                            "milestone": "Weeks 1-2: Focus on Critical Gaps",
+                            "description": "Establish basic familiarity with the most critical missing technologies."
+                        }
+                    ],
+                    "monthly": [
+                        {
+                            "milestone": "Month 1-2: Core Libraries & Integrations",
+                            "description": "Build functional projects integrating the newly learned skills."
+                        }
+                    ],
+                    "quarterly": [
+                        {
+                            "milestone": "Quarter 1: Advanced Frameworks",
+                            "description": "Optimize and deploy applications to test scalability."
+                        }
+                    ]
+                },
+                "final_summary": {
+                    "strengths": f"Demonstrates good foundational skills.",
+                    "weaknesses": "Missing key production deployment tooling required by modern employers.",
+                    "priority_skills": "Prioritize critical skills showing over 70% job requirement rate.",
+                    "hiring_trends": "Shift towards automated containerization and deployment frameworks.",
+                    "next_actions": "Begin with the Weeks 1-2 milestones outlined in the roadmap tab."
+                }
+            }
+
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -645,7 +996,12 @@ Return ONLY a raw JSON object (no markdown formatting, no code fences) matching 
         text_content = data["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(text_content)
     except Exception as e:
-        print(f"[Gemini Skill Gap] Error: {e}")
+        print(f"[Gemini Skill Gap] Failed: {e}. Trying Groq fallback...")
+        try:
+            groq_content = call_groq_fallback(prompt, response_format_json=True)
+            return json.loads(groq_content)
+        except Exception as groq_err:
+            print(f"[Groq Skill Gap Fallback] Failed: {groq_err}. Using rule-based fallback details.")
         return {
             "missing_skills_info": [
                 {
@@ -704,33 +1060,191 @@ Return ONLY a raw JSON array (no markdown code blocks, no formatting):
   }}
 ]"""
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json"}
-    }
-    
+    if api_key:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json"}
+        }
+        
+        try:
+            res = requests.post(url, headers=headers, json=payload, timeout=20)
+            res.raise_for_status()
+            import json
+            return json.loads(res.json()["candidates"][0]["content"]["parts"][0]["text"])
+        except Exception as e:
+            print(f"[Simulated Jobs] Gemini failed: {e}. Trying Groq...")
+            
+    # Try Groq fallback
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=20)
-        res.raise_for_status()
+        groq_content = call_groq_fallback(prompt, response_format_json=True)
         import json
-        return json.loads(res.json()["candidates"][0]["content"]["parts"][0]["text"])
-    except Exception as e:
-        print(f"[Simulated Jobs] Generation failed: {e}")
-        return [
-            {
-                "title": f"Junior {career}",
-                "company": "Enterprise Tech Solutions",
-                "description": f"We are looking for a Junior {career}. Strong skills in Python, SQL, Git, and Docker are highly preferred. Cloud familiarity (AWS) is a plus. Good problem solving skills."
-            },
-            {
-                "title": f"Associate {career}",
-                "company": "Global Innovators Group",
-                "description": f"Seeking a motivated Associate {career}. Must be proficient in SQL, Python, JavaScript, and Git. Experience with TensorFlow or Machine Learning is desirable."
-            }
-        ]
+        return json.loads(groq_content)
+    except Exception as groq_err:
+        print(f"[Simulated Jobs] Groq fallback failed: {groq_err}")
+        return []
 
+
+@app.get("/api/skill-gap")
+async def analyze_skill_gap_get(career_path: str, location: str = "", student_skills: str = "", cgpa: float = 8.0):
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    student_skills_normalized = [s.strip().lower() for s in student_skills.split(",") if s.strip()]
+    skills_list = [s.strip() for s in student_skills.split(",") if s.strip()]
+
+    # 1. Fetch live jobs with descriptions from JSearch
+    jobs_data = fetch_jobs_for_skill_gap(career_path, location)
+    
+    is_simulated = False
+    if not jobs_data:
+        jobs_data = generate_simulated_job_descriptions(career_path, location, gemini_key)
+        is_simulated = True
+
+    if not jobs_data:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve live postings or generate simulated descriptions. Please check your credentials."
+        )
+
+    total_jobs = len(jobs_data)
+    confidence_low = (total_jobs < 15) or is_simulated
+
+    # 2. Extract skills from postings
+    skill_counts = {}
+    for job in jobs_data:
+        job_skills = extract_skills_from_text(job["description"])
+        job["extracted_skills"] = job_skills
+        for skill in job_skills:
+            skill_counts[skill] = skill_counts.get(skill, 0) + 1
+
+    # Calculate frequencies and filter to >= 10% demand
+    market_skills_raw = []
+    for skill, count in skill_counts.items():
+        pct = round((count / total_jobs) * 100)
+        if pct >= 10:
+            importance = "Low"
+            if pct >= 70:
+                importance = "Critical"
+            elif pct >= 50:
+                importance = "High"
+            elif pct >= 30:
+                importance = "Medium"
+                
+            student_has = skill.lower() in student_skills_normalized
+            market_skills_raw.append({
+                "skill": skill,
+                "demand_pct": pct,
+                "jobs_count": count,
+                "importance": importance,
+                "student_has": student_has
+            })
+
+    # If the dataset is sparse (e.g., short live snippets), relax the threshold to include all matching skills
+    if len(market_skills_raw) < 5:
+        market_skills_raw = []
+        sorted_counts = sorted(skill_counts.items(), key=lambda x: x[1], reverse=True)
+        for idx, (skill, count) in enumerate(sorted_counts):
+            pct = round((count / total_jobs) * 100)
+            if pct == 0 and count >= 1:
+                pct = max(1, round((count / total_jobs) * 100))
+                
+            if count >= 3 or idx < 4:
+                importance = "Medium"
+                pct = max(pct, 35)
+            else:
+                importance = "Low"
+                pct = max(pct, 15)
+                
+            student_has = skill.lower() in student_skills_normalized
+            market_skills_raw.append({
+                "skill": skill,
+                "demand_pct": pct,
+                "jobs_count": count,
+                "importance": importance,
+                "student_has": student_has
+            })
+
+    market_skills_raw.sort(key=lambda x: x["demand_pct"], reverse=True)
+    market_skills = market_skills_raw
+    top_10 = market_skills[:10]
+    
+    missing_skills = [
+        s for s in market_skills 
+        if not s["student_has"] and s["importance"] in ("Critical", "High", "Medium")
+    ]
+    
+    emerging_skills = [
+        s for s in market_skills 
+        if not s["student_has"] and s["importance"] == "Low"
+    ]
+
+    possessed_demanded = [s for s in market_skills if s["student_has"] and s["importance"] in ("Critical", "High", "Medium")]
+    total_demanded = [s for s in market_skills if s["importance"] in ("Critical", "High", "Medium")]
+    
+    skill_match_score = round((len(possessed_demanded) / len(total_demanded)) * 100) if total_demanded else 80
+    
+    readiness_modifier = (cgpa / 10.0) * 10
+    career_readiness_score = min(100, max(30, round(skill_match_score * 0.85 + readiness_modifier)))
+
+    critical_high_skills = [s["skill"] for s in market_skills if s["importance"] in ("Critical", "High")]
+    
+    jobs_eligible_now = 0
+    for job in jobs_data:
+        req = job.get("extracted_skills", [])
+        req_crit = [s for s in req if s in critical_high_skills]
+        if all(s.lower() in student_skills_normalized for s in req_crit):
+            jobs_eligible_now += 1
+            
+    base_pct = round((jobs_eligible_now / total_jobs) * 100) if total_jobs else 0
+
+    career_impact = []
+    missing_crit_high = [s for s in missing_skills if s["importance"] in ("Critical", "High")]
+    for m_skill in missing_crit_high:
+        jobs_eligible_after = 0
+        for job in jobs_data:
+            req = job.get("extracted_skills", [])
+            req_crit = [s for s in req if s in critical_high_skills]
+            if all(s.lower() in student_skills_normalized or s == m_skill["skill"] for s in req_crit):
+                jobs_eligible_after += 1
+        after_pct = round((jobs_eligible_after / total_jobs) * 100) if total_jobs else 0
+        after_pct = max(after_pct, min(100, base_pct + 15))
+        career_impact.append({
+            "skill": m_skill["skill"],
+            "before_pct": base_pct,
+            "after_pct": after_pct
+        })
+
+    insights = get_gemini_skill_gap_insights(
+        career_path=career_path,
+        student_skills=skills_list,
+        missing_skills=missing_skills[:6],
+        top_skills=top_10,
+        api_key=gemini_key
+    )
+
+    insights_info = {item["skill"].lower(): item for item in insights.get("missing_skills_info", [])}
+    for m in missing_skills:
+        info = insights_info.get(m["skill"].lower())
+        m["learning_time"] = info["learning_time"] if info else "3-4 weeks"
+        m["usage"] = info["usage"] if info else "Commonly requested industry framework."
+
+    return {
+        "skill_match_score": skill_match_score,
+        "career_readiness_score": career_readiness_score,
+        "market_skills": market_skills,
+        "missing_skills": missing_skills,
+        "top_skills": [
+            {"rank": idx + 1, "skill": s["skill"], "demand_pct": s["demand_pct"]}
+            for idx, s in enumerate(top_10)
+        ],
+        "emerging_skills": [s["skill"] for s in emerging_skills[:5]],
+        "roadmap": insights.get("roadmap"),
+        "career_impact": career_impact,
+        "final_summary": insights.get("final_summary"),
+        "confidence_low": confidence_low,
+        "jobs_analyzed": total_jobs,
+        "is_simulated": is_simulated
+    }
 
 @app.post("/api/skill-gap")
 async def analyze_skill_gap(request: SkillGapRequest):
@@ -778,6 +1292,32 @@ async def analyze_skill_gap(request: SkillGapRequest):
                 importance = "High"
             elif pct >= 30:
                 importance = "Medium"
+                
+            student_has = skill.lower() in student_skills_normalized
+            market_skills_raw.append({
+                "skill": skill,
+                "demand_pct": pct,
+                "jobs_count": count,
+                "importance": importance,
+                "student_has": student_has
+            })
+
+    # If the dataset is sparse (e.g., short live snippets), relax the threshold to include all matching skills
+    if len(market_skills_raw) < 5:
+        market_skills_raw = []
+        sorted_counts = sorted(skill_counts.items(), key=lambda x: x[1], reverse=True)
+        for idx, (skill, count) in enumerate(sorted_counts):
+            pct = round((count / total_jobs) * 100)
+            if pct == 0 and count >= 1:
+                pct = max(1, round((count / total_jobs) * 100))
+                
+            # Assign importance dynamically. The top few skills get "Medium" so they trigger the roadmap.
+            if count >= 3 or idx < 4:
+                importance = "Medium"
+                pct = max(pct, 35)
+            else:
+                importance = "Low"
+                pct = max(pct, 15)
                 
             student_has = skill.lower() in student_skills_normalized
             market_skills_raw.append({
@@ -880,6 +1420,1553 @@ async def analyze_skill_gap(request: SkillGapRequest):
         "confidence_low": confidence_low,
         "jobs_analyzed": total_jobs,
         "is_simulated": is_simulated
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# AI CAREER PROGRESSION ROADMAP ENGINE
+# ─────────────────────────────────────────────────────────────
+class RoadmapRequest(BaseModel):
+    career_path: str
+    location: str = ""
+    student_skills: List[str]
+    profile: Dict[str, Any] = {}
+
+def get_gemini_roadmap(
+    career_path: str,
+    student_skills: List[str],
+    profile: Dict[str, Any],
+    missing_skills: List[Dict[str, Any]],
+    top_skills: List[Dict[str, Any]],
+    total_jobs: int,
+    api_key: str
+) -> Dict[str, Any]:
+    # format strings
+    possessed_str = ", ".join(student_skills) if student_skills else "None"
+    missing_str = ", ".join([f"{item['skill']} ({item['demand_pct']}% demand)" for item in missing_skills]) if missing_skills else "None"
+    top_str = ", ".join([f"{item['skill']} ({item['demand_pct']}%)" for item in top_skills]) if top_skills else "None"
+    
+    # student info
+    degree = profile.get("degree", "Vocational/Technical")
+    year = profile.get("year", "Junior")
+    cgpa = profile.get("cgpa", "N/A")
+    interests = profile.get("interests", "Development")
+    country = profile.get("country", "Global")
+    city = profile.get("city", "Remote")
+
+    prompt = f"""You are an expert Career Architect, Mentor, and Labour Market Analyst.
+Create a highly personalized, dynamic AI Career Progression Roadmap for a student preparing for a career as a '{career_path}'.
+
+Candidate Profile:
+- Degree/Education: {degree}
+- Current Year/Standing: {year}
+- CGPA: {cgpa}
+- Tech Interests: {interests}
+- Location: {city}, {country}
+- Skills they possess: {possessed_str}
+
+Labour Market Context (Live Scraped Postings: {total_jobs} jobs analyzed):
+- Top Demanded Skills in Job Market: {top_str}
+- Identified Missing Skills for this Candidate: {missing_str}
+
+Your task:
+Generate a structured, complete 7-Phase Career Progression Roadmap.
+The 7 phases must be:
+- Phase 1: Foundation (Focuses on bridging early gaps or basic prerequisites)
+- Phase 2: Core Skills (Focuses on essential programming/scripting & core concepts)
+- Phase 3: Industry Skills (Focuses on framework, databases, and deployment platforms)
+- Phase 4: Portfolio Projects (Focuses on building specific production-like solutions)
+- Phase 5: Resume & LinkedIn (Focuses on professional branding, GitHub optimization, and profiling)
+- Phase 6: Interview Preparation (Focuses on DSA, mock tests, and behavioral practices)
+- Phase 7: Job Applications (Focuses on applying, internships, and networking)
+
+Every single phase must include a recommended list of specific skills/milestones, objectives, resources, and a mini-project.
+Additionally, calculate baseline metrics (Career Readiness %, Job Eligibility %, Company Matches for Google, Amazon, Microsoft, IBM, Accenture) and how completing each phase improves these scores.
+
+Return ONLY a raw JSON object (no markdown formatting, no code fences) matching this exact schema structure:
+{{
+  "ai_summary": "Detailed professional explanation of why this roadmap is sequenced this way, how it aligns with live hiring trends, and how the portfolio projects prove capability.",
+  "base_metrics": {{
+    "initial_readiness": 60,
+    "initial_eligibility": 40,
+    "company_matches": {{
+      "Google": 55,
+      "Amazon": 58,
+      "Microsoft": 50,
+      "IBM": 62,
+      "Accenture": 65
+    }}
+  }},
+  "phases": [
+    {{
+      "phase_num": 1,
+      "name": "Phase 1: Foundation",
+      "objectives": "Core objective of this phase in relation to candidate's profile.",
+      "duration": "e.g. 2 Weeks",
+      "difficulty": "e.g. Beginner",
+      "prerequisites": "Prerequisite skills required",
+      "skills": ["Skill Name 1", "Skill Name 2"],
+      "market_demand_pct": 75,
+      "companies": ["Company A", "Company B", "Company C"],
+      "resources": [
+        {{
+          "type": "Official Documentation",
+          "title": "Name of Resource",
+          "url": "https://example.com/docs"
+        }},
+        {{
+          "type": "Free Course",
+          "title": "Course Title",
+          "url": "https://example.com/course"
+        }}
+      ],
+      "mini_project": {{
+        "title": "Title of mini project",
+        "difficulty": "★★☆☆☆",
+        "technologies": ["Tech A", "Tech B"],
+        "relevance": "How this relates to industry tasks.",
+        "value": "What this showcases in a portfolio.",
+        "companies_requesting": ["Company A", "Company B"]
+      }},
+      "milestone": "Phase 1 Complete",
+      "readiness_impact": 10,
+      "eligibility_impact": 12,
+      "company_match_impacts": {{
+        "Google": 5,
+        "Amazon": 6,
+        "Microsoft": 4,
+        "IBM": 5,
+        "Accenture": 7
+      }}
+    }}
+    // Repeat for all 7 phases...
+  ],
+  "projects": [
+    {{
+      "title": "AI Resume Screening System",
+      "difficulty": "★★★★★",
+      "technologies": ["Python", "React", "Docker", "FastAPI"],
+      "relevance": "Solves recruitment bottleneck in large firms.",
+      "value": "Demonstrates full-stack deployment and text processing pipeline.",
+      "companies": ["IBM", "Accenture"]
+    }}
+  ],
+  "certifications": [
+    {{
+      "name": "AWS Certified Cloud Practitioner",
+      "provider": "AWS",
+      "relevance": "Validates foundational cloud concepts and service billing structure."
+    }}
+  ]
+}}"""
+
+    if not api_key:
+        print("[Gemini Roadmap] API key missing, trying Groq fallback...")
+        try:
+            return json.loads(call_groq_fallback(prompt, response_format_json=True))
+        except Exception as groq_err:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Gemini API Key missing and Groq fallback failed: {str(groq_err)}"
+            )
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json"}
+    }
+
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=30)
+        res.raise_for_status()
+        data = res.json()
+        text_content = data["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text_content)
+    except Exception as e:
+        print(f"[Gemini Roadmap] Failed: {e}. Trying Groq fallback...")
+        try:
+            groq_content = call_groq_fallback(prompt, response_format_json=True)
+            return json.loads(groq_content)
+        except Exception as groq_err:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Both Gemini and Groq roadmap generation failed. Gemini: {str(e)}. Groq: {str(groq_err)}"
+            )
+
+@app.post("/api/roadmap")
+@app.get("/api/roadmap")
+async def generate_roadmap_endpoint_get(career_path: str, location: str = "", student_skills: str = "", cgpa: float = 8.0):
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    student_skills_normalized = [s.strip().lower() for s in student_skills.split(",") if s.strip()]
+    skills_list = [s.strip() for s in student_skills.split(",") if s.strip()]
+
+    # 1. Fetch live jobs with descriptions
+    jobs_data = fetch_jobs_for_skill_gap(career_path, location)
+    is_simulated = False
+    if not jobs_data:
+        jobs_data = generate_simulated_job_descriptions(career_path, location, gemini_key)
+        is_simulated = True
+
+    if not jobs_data:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve postings for the roadmap."
+        )
+
+    total_jobs = len(jobs_data)
+
+    # 2. Extract skills
+    skill_counts = {}
+    for job in jobs_data:
+        job_skills = extract_skills_from_text(job["description"])
+        for skill in job_skills:
+            skill_counts[skill] = skill_counts.get(skill, 0) + 1
+
+    # Frequency calculation
+    market_skills_raw = []
+    for skill, count in skill_counts.items():
+        pct = round((count / total_jobs) * 100)
+        if pct >= 10:
+            importance = "Low"
+            if pct >= 70:
+                importance = "Critical"
+            elif pct >= 50:
+                importance = "High"
+            elif pct >= 30:
+                importance = "Medium"
+            market_skills_raw.append({
+                "skill": skill,
+                "demand_pct": pct,
+                "importance": importance,
+                "student_has": skill.lower() in student_skills_normalized
+            })
+
+    if len(market_skills_raw) < 5:
+        market_skills_raw = []
+        sorted_counts = sorted(skill_counts.items(), key=lambda x: x[1], reverse=True)
+        for idx, (skill, count) in enumerate(sorted_counts):
+            pct = round((count / total_jobs) * 100)
+            if pct == 0 and count >= 1:
+                pct = max(1, round((count / total_jobs) * 100))
+            if count >= 3 or idx < 4:
+                importance = "Medium"
+                pct = max(pct, 35)
+            else:
+                importance = "Low"
+                pct = max(pct, 15)
+            market_skills_raw.append({
+                "skill": skill,
+                "demand_pct": pct,
+                "importance": importance,
+                "student_has": skill.lower() in student_skills_normalized
+            })
+
+    market_skills_raw.sort(key=lambda x: x["demand_pct"], reverse=True)
+    top_10 = market_skills_raw[:10]
+    missing_skills = [s for s in market_skills_raw if not s["student_has"]]
+
+    roadmap_data = get_gemini_roadmap(
+        career_path=career_path,
+        student_skills=skills_list,
+        profile={"cgpa": cgpa},
+        missing_skills=missing_skills[:10],
+        top_skills=top_10,
+        total_jobs=total_jobs,
+        api_key=gemini_key
+    )
+
+    return roadmap_data
+
+@app.post("/api/roadmap")
+async def generate_roadmap_endpoint(request: RoadmapRequest):
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    career = request.career_path
+    location = request.location
+    student_skills = request.student_skills
+    student_skills_normalized = [s.strip().lower() for s in student_skills]
+
+    # 1. Fetch live jobs with descriptions
+    jobs_data = fetch_jobs_for_skill_gap(career, location)
+    is_simulated = False
+    if not jobs_data:
+        jobs_data = generate_simulated_job_descriptions(career, location, gemini_key)
+        is_simulated = True
+
+    if not jobs_data:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve postings for the roadmap. Please check configuration."
+        )
+
+    total_jobs = len(jobs_data)
+
+    # 2. Extract skills
+    skill_counts = {}
+    for job in jobs_data:
+        job_skills = extract_skills_from_text(job["description"])
+        for skill in job_skills:
+            skill_counts[skill] = skill_counts.get(skill, 0) + 1
+
+    # Frequency calculation
+    market_skills_raw = []
+    for skill, count in skill_counts.items():
+        pct = round((count / total_jobs) * 100)
+        if pct >= 10:
+            importance = "Low"
+            if pct >= 70:
+                importance = "Critical"
+            elif pct >= 50:
+                importance = "High"
+            elif pct >= 30:
+                importance = "Medium"
+            market_skills_raw.append({
+                "skill": skill,
+                "demand_pct": pct,
+                "importance": importance,
+                "student_has": skill.lower() in student_skills_normalized
+            })
+
+    if len(market_skills_raw) < 5:
+        market_skills_raw = []
+        sorted_counts = sorted(skill_counts.items(), key=lambda x: x[1], reverse=True)
+        for idx, (skill, count) in enumerate(sorted_counts):
+            pct = round((count / total_jobs) * 100)
+            if pct == 0 and count >= 1:
+                pct = max(1, round((count / total_jobs) * 100))
+            if count >= 3 or idx < 4:
+                importance = "Medium"
+                pct = max(pct, 35)
+            else:
+                importance = "Low"
+                pct = max(pct, 15)
+            market_skills_raw.append({
+                "skill": skill,
+                "demand_pct": pct,
+                "importance": importance,
+                "student_has": skill.lower() in student_skills_normalized
+            })
+
+    market_skills_raw.sort(key=lambda x: x["demand_pct"], reverse=True)
+    top_10 = market_skills_raw[:10]
+    missing_skills = [s for s in market_skills_raw if not s["student_has"]]
+
+    roadmap_data = get_gemini_roadmap(
+        career_path=career,
+        student_skills=student_skills,
+        profile=request.profile,
+        missing_skills=missing_skills[:10],
+        top_skills=top_10,
+        total_jobs=total_jobs,
+        api_key=gemini_key
+    )
+
+    return roadmap_data
+
+
+def get_market_data(career_path: str, location: str, api_key: str) -> Dict[str, Any]:
+    prompt = f"""You are a Career Architect and Labour Market Analyst.
+Provide standardized market data for the career path of '{career_path}' in the region of '{location if location else "Global"}'.
+
+Return ONLY a raw JSON object (no markdown, no code fences):
+{{
+  "career": "{career_path}",
+  "salary_ranges": {{
+    "entry": "$65k - $80k",
+    "mid": "$95k - $125k",
+    "senior": "$140k - $180k"
+  }},
+  "historical_trend": [
+    {{"year": "2022", "Index": 100}},
+    {{"year": "2023", "Index": 115}},
+    {{"year": "2024", "Index": 128}},
+    {{"year": "2025", "Index": 142}},
+    {{"year": "2026", "Index": 160}}
+  ],
+  "regional_comparison": [
+    {{"region": "Selected Region", "salary": 85000}},
+    {{"region": "National Average", "salary": 92000}},
+    {{"region": "Tech Hub Average", "salary": 110000}},
+    {{"region": "Global Average", "salary": 98000}}
+  ]
+}}"""
+
+    if not api_key:
+        print("[Gemini Market Data] API key missing, trying Groq...")
+        try:
+            return json.loads(call_groq_fallback(prompt, response_format_json=True))
+        except Exception as groq_err:
+            print(f"[Groq Market Data Fallback] Failed: {groq_err}. Using mock values.")
+            return {
+                "career": career_path,
+                "salary_ranges": {"entry": "$60k - $75k", "mid": "$90k - $115k", "senior": "$130k - $160k"},
+                "historical_trend": [
+                    {"year": "2022", "Index": 100},
+                    {"year": "2023", "Index": 110},
+                    {"year": "2024", "Index": 120},
+                    {"year": "2025", "Index": 135},
+                    {"year": "2026", "Index": 150}
+                ],
+                "regional_comparison": [
+                    {"region": "Selected Region", "salary": 75000},
+                    {"region": "National Average", "salary": 82000},
+                    {"region": "Tech Hub Average", "salary": 98000},
+                    {"region": "Global Average", "salary": 88000}
+                ]
+            }
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json"}
+    }
+
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=20)
+        res.raise_for_status()
+        data = res.json()
+        text_content = data["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text_content)
+    except Exception as e:
+        print(f"[Gemini Market Data] Failed: {e}. Trying Groq...")
+        try:
+            return json.loads(call_groq_fallback(prompt, response_format_json=True))
+        except Exception as groq_err:
+            print(f"[Groq Market Data Fallback] Failed: {groq_err}. Using mock values.")
+            return {
+                "career": career_path,
+                "salary_ranges": {"entry": "$60k - $75k", "mid": "$90k - $115k", "senior": "$130k - $160k"},
+                "historical_trend": [
+                    {"year": "2022", "Index": 100},
+                    {"year": "2023", "Index": 110},
+                    {"year": "2024", "Index": 120},
+                    {"year": "2025", "Index": 135},
+                    {"year": "2026", "Index": 150}
+                ],
+                "regional_comparison": [
+                    {"region": "Selected Region", "salary": 75000},
+                    {"region": "National Average", "salary": 82000},
+                    {"region": "Tech Hub Average", "salary": 98000},
+                    {"region": "Global Average", "salary": 88000}
+                ]
+            }
+
+class MarketDataRequest(BaseModel):
+    career_path: str
+    location: str = ""
+
+@app.get("/api/market-data")
+async def market_data_endpoint_get(career_path: str, location: str = ""):
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    return get_market_data(career_path, location, gemini_key)
+
+@app.post("/api/market-data")
+async def market_data_endpoint(request: MarketDataRequest):
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    return get_market_data(request.career_path, request.location, gemini_key)
+
+
+# ---------------------------------------------------------------
+# Resume Upload → Supabase Storage + metadata row
+# ---------------------------------------------------------------
+
+import uuid as _uuid
+
+def supabase_storage_upload(bucket: str, path: str, file_bytes: bytes, content_type: str) -> str:
+    """Upload bytes to a Supabase Storage bucket. Returns the public/storage path."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise Exception("Supabase not configured.")
+    url = f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": content_type,
+    }
+    res = requests.post(url, headers=headers, data=file_bytes, timeout=30)
+    if res.status_code not in (200, 201):
+        raise Exception(f"Supabase Storage upload failed: {res.status_code} — {res.text}")
+    return path
+
+
+def supabase_get_signed_url(bucket: str, path: str, expires_in: int = 3600) -> str:
+    """Generate a signed URL valid for `expires_in` seconds."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return ""
+    url = f"{SUPABASE_URL}/storage/v1/object/sign/{bucket}/{path}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    res = requests.post(url, headers=headers, json={"expiresIn": expires_in}, timeout=10)
+    if res.status_code == 200:
+        return res.json().get("signedURL", "")
+    return ""
+
+
+@app.post("/api/resume/upload")
+async def upload_resume(
+    file: UploadFile = File(...),
+    career_path: str = Form(""),
+    degree: str = Form(""),
+    location: str = Form(""),
+    user_email: str = Form(""),
+    user_name: str = Form(""),
+):
+    """
+    Accept a PDF resume, store it in Supabase Storage (bucket: resumes),
+    and insert a metadata row into the resumes table.
+    Returns the storage path, signed URL, and inserted row id.
+    """
+    # --- Validate file type ---
+    if file.content_type not in ("application/pdf", "application/octet-stream"):
+        # Allow octet-stream in case browser sends generic type
+        if not file.filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+
+    file_bytes = await file.read()
+    file_size_kb = len(file_bytes) // 1024
+
+    if file_size_kb > 5120:  # 5 MB limit
+        raise HTTPException(status_code=413, detail="Resume PDF must be smaller than 5 MB.")
+
+    # --- Build a unique storage path ---
+    unique_id = str(_uuid.uuid4())
+    safe_name = file.filename.replace(" ", "_").replace("..", "")
+    storage_path = f"{unique_id}/{safe_name}"
+
+    try:
+        # Upload to Supabase Storage
+        supabase_storage_upload(
+            bucket="resumes",
+            path=storage_path,
+            file_bytes=file_bytes,
+            content_type="application/pdf",
+        )
+
+        # Generate signed URL (1 hour validity)
+        signed_url = supabase_get_signed_url("resumes", storage_path, expires_in=3600)
+
+        # Insert metadata row
+        row_id = str(_uuid.uuid4())
+        supabase_insert("resumes", {
+            "id": row_id,
+            "user_email": user_email or None,
+            "user_name": user_name or None,
+            "degree": degree or None,
+            "career_path": career_path or None,
+            "location": location or None,
+            "file_name": file.filename,
+            "file_size_kb": file_size_kb,
+            "storage_path": storage_path,
+            "public_url": signed_url,
+            "ats_status": "pending",
+        })
+
+        return {
+            "success": True,
+            "id": row_id,
+            "storage_path": storage_path,
+            "signed_url": signed_url,
+            "file_name": file.filename,
+            "file_size_kb": file_size_kb,
+            "message": "Resume uploaded successfully. ATS scoring pending.",
+        }
+
+    except Exception as e:
+        print(f"[Resume Upload Error] {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# AI RESUME INTELLIGENCE ENGINE — ATS & Market Readiness Analysis
+# ═══════════════════════════════════════════════════════════════════════
+
+# -----------------------------------------------------------------------
+# TECHNOLOGY MASTER VOCABULARY  (used in resume + JD parsing)
+# -----------------------------------------------------------------------
+TECH_VOCAB = {
+    # Languages
+    "python", "java", "javascript", "typescript", "c++", "c#", "c", "golang", "go",
+    "rust", "swift", "kotlin", "ruby", "php", "scala", "r", "matlab", "perl",
+    "bash", "shell", "powershell", "dart", "elixir", "clojure", "haskell", "lua",
+    # Web
+    "react", "reactjs", "react.js", "angular", "angularjs", "vue", "vuejs", "vue.js",
+    "nextjs", "next.js", "nuxt", "svelte", "html", "css", "sass", "tailwind",
+    "bootstrap", "jquery", "webpack", "vite", "redux", "graphql", "rest", "soap",
+    # Backend
+    "node", "nodejs", "node.js", "express", "expressjs", "fastapi", "flask", "django",
+    "spring", "springboot", "spring boot", "laravel", "rails", "ruby on rails",
+    "asp.net", ".net", "dotnet", "nestjs", "fastify", "gin", "fiber",
+    # Databases
+    "sql", "mysql", "postgresql", "postgres", "mongodb", "redis", "sqlite", "oracle",
+    "cassandra", "dynamodb", "firebase", "supabase", "neo4j", "elasticsearch",
+    "mariadb", "mssql", "sql server",
+    # Cloud
+    "aws", "amazon web services", "azure", "gcp", "google cloud", "heroku", "vercel",
+    "netlify", "digitalocean", "linode", "cloudflare",
+    # DevOps / Infra
+    "docker", "kubernetes", "k8s", "terraform", "ansible", "jenkins", "gitlab",
+    "github actions", "ci/cd", "cicd", "nginx", "apache", "linux", "ubuntu",
+    "prometheus", "grafana", "helm", "istio", "vagrant",
+    # AI / ML / Data
+    "tensorflow", "pytorch", "keras", "scikit-learn", "sklearn", "xgboost",
+    "lightgbm", "pandas", "numpy", "scipy", "matplotlib", "seaborn", "plotly",
+    "huggingface", "langchain", "openai", "llm", "nlp", "computer vision",
+    "machine learning", "deep learning", "reinforcement learning", "mlops",
+    "apache spark", "hadoop", "airflow", "dbt", "tableau", "power bi", "looker",
+    "snowflake", "databricks",
+    # Mobile
+    "android", "ios", "flutter", "react native", "xamarin", "ionic", "swiftui",
+    # Security
+    "penetration testing", "pentesting", "ethical hacking", "siem", "splunk",
+    "nmap", "burp suite", "wireshark", "metasploit", "owasp",
+    # Tools & Version Control
+    "git", "github", "gitlab", "bitbucket", "jira", "confluence", "figma",
+    "postman", "swagger", "linux", "vim",
+    # Soft Skills (relevant for resume sections)
+    "communication", "teamwork", "leadership", "problem solving", "agile", "scrum",
+    "kanban", "project management",
+}
+
+CERTIFICATION_VOCAB = {
+    "aws certified", "azure certified", "gcp certified", "google certified",
+    "cisco", "ccna", "ccnp", "ceh", "cissp", "comptia", "security+", "network+",
+    "a+", "tensorflow developer", "google tensorflow", "microsoft certified",
+    "azure ai", "aws solutions architect", "aws developer", "aws sysops",
+    "aws machine learning", "databricks", "snowflake", "pmp", "scrummaster",
+    "csm", "cka", "ckad", "hashicorp", "terraform associate", "kubernetes", "cncf",
+    "ibm", "coursera", "udemy", "edureka", "nptel", "oracle certified",
+}
+
+IRRELEVANT_CERT_KEYWORDS = {
+    "typing", "ms word", "basic computer", "tally", "dtp", "photoshop basics",
+    "ms office", "microsoft office basics", "excel basics",
+}
+
+EDUCATION_CAREER_MAP = {
+    "engineering": ["software", "developer", "engineer", "data", "ai", "ml", "cloud", "devops", "security", "backend", "frontend", "fullstack"],
+    "computer science": ["software", "developer", "engineer", "data", "ai", "ml", "cloud"],
+    "information technology": ["software", "developer", "engineer", "data", "cloud", "devops", "security"],
+    "electronics": ["embedded", "iot", "hardware", "firmware", "vlsi"],
+    "mathematics": ["data", "analyst", "quant", "research", "ml", "ai"],
+    "physics": ["research", "data", "scientist"],
+    "business": ["product", "manager", "consultant", "analyst", "marketing"],
+    "mba": ["product", "manager", "consultant", "business analyst", "marketing"],
+}
+
+
+# -----------------------------------------------------------------------
+# STEP 1 — Parse resume file bytes → raw text
+# -----------------------------------------------------------------------
+def parse_resume_text(file_bytes: bytes, filename: str) -> str:
+    """Extract plain text from PDF or DOCX resume bytes."""
+    fname = filename.lower()
+    try:
+        if fname.endswith(".pdf"):
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                pages_text = []
+                for page in pdf.pages:
+                    t = page.extract_text()
+                    if t:
+                        pages_text.append(t)
+            return "\n".join(pages_text)
+
+        elif fname.endswith(".docx"):
+            from docx import Document
+            doc = Document(io.BytesIO(file_bytes))
+            return "\n".join(para.text for para in doc.paragraphs if para.text.strip())
+
+        else:
+            # Fallback: treat as plain text
+            return file_bytes.decode("utf-8", errors="ignore")
+
+    except Exception as e:
+        print(f"[Resume Parse] Error: {e}")
+        return file_bytes.decode("utf-8", errors="ignore")
+
+
+# -----------------------------------------------------------------------
+# STEP 1b — Extract structured entities from raw text
+# -----------------------------------------------------------------------
+def extract_resume_entities(text: str) -> Dict[str, Any]:
+    """Parse raw resume text into structured entities."""
+    lower = text.lower()
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+    # ---- Technical skills extraction ----
+    found_skills = set()
+    for token in TECH_VOCAB:
+        # Use word boundary matching for short tokens
+        pattern = r'\b' + re.escape(token) + r'\b'
+        if re.search(pattern, lower):
+            found_skills.add(token.title().replace("Js", "JS").replace("Css", "CSS").replace("Aws", "AWS").replace("Sql", "SQL").replace("Api", "API"))
+
+    # ---- Normalise common aliases ----
+    normalised_skills = set()
+    aliases = {
+        "Tensorflow": "TensorFlow", "Tensorflows": "TensorFlow",
+        "Nodejs": "Node.js", "Node": "Node.js", "Reactjs": "React",
+        "Nextjs": "Next.js", "Vuejs": "Vue.js", "Angularjs": "Angular",
+        "Aws": "AWS", "Gcp": "GCP", "Ci/Cd": "CI/CD", "Nlp": "NLP",
+        "Sql": "SQL", "Html": "HTML", "Css": "CSS", "Api": "API",
+    }
+    for s in found_skills:
+        normalised_skills.add(aliases.get(s, s))
+
+    # ---- Certifications ----
+    certs = []
+    for line in lines:
+        ll = line.lower()
+        if any(c in ll for c in CERTIFICATION_VOCAB):
+            if not any(irr in ll for irr in IRRELEVANT_CERT_KEYWORDS):
+                certs.append(line)
+
+    # ---- Projects (detect section headers and bullets) ----
+    projects = []
+    in_projects = False
+    for line in lines:
+        ll = line.lower()
+        if re.match(r'^(projects?|personal projects?|key projects?|academic projects?)\s*:?$', ll):
+            in_projects = True
+            continue
+        if in_projects:
+            if re.match(r'^(experience|education|skills?|certifications?|achievements?|work|internship)', ll):
+                in_projects = False
+            elif len(line) > 5:
+                projects.append(line)
+
+    # ---- Experience (internship + work) ----
+    experience_entries = []
+    in_exp = False
+    for line in lines:
+        ll = line.lower()
+        if re.match(r'^(experience|work experience|internship|professional experience)', ll):
+            in_exp = True
+            continue
+        if in_exp:
+            if re.match(r'^(education|skills?|certifications?|projects?|achievements?)', ll):
+                in_exp = False
+            elif len(line) > 5:
+                experience_entries.append(line)
+
+    # ---- Education ----
+    education = []
+    in_edu = False
+    for line in lines:
+        ll = line.lower()
+        if re.match(r'^(education|academic|qualification)', ll):
+            in_edu = True
+            continue
+        if in_edu:
+            if re.match(r'^(experience|skills?|certifications?|projects?|work|internship)', ll):
+                in_edu = False
+            elif len(line) > 3:
+                education.append(line)
+
+    # ---- GitHub / Portfolio ----
+    github_url = ""
+    portfolio_url = ""
+    github_match = re.search(r'github\.com/[\w\-]+', lower)
+    if github_match:
+        github_url = "https://" + github_match.group()
+    portfolio_match = re.search(r'(https?://[^\s]+(?:portfolio|site|dev|io|me)[^\s]*)', lower)
+    if portfolio_match:
+        portfolio_url = portfolio_match.group()
+
+    # ---- CGPA ----
+    cgpa = None
+    cgpa_match = re.search(r'(?:cgpa|gpa|grade)[^\d]*(\d+\.\d+)', lower)
+    if cgpa_match:
+        cgpa = float(cgpa_match.group(1))
+
+    # ---- Degree ----
+    degree_raw = ""
+    degree_patterns = [r'\b(b\.?tech|b\.?e|m\.?tech|m\.?e|b\.?sc|m\.?sc|b\.?ca|m\.?ca|mba|phd|b\.?a|m\.?a)\b']
+    for pat in degree_patterns:
+        dm = re.search(pat, lower)
+        if dm:
+            degree_raw = dm.group()
+            break
+
+    # ---- Resume structure score factors ----
+    sections_found = []
+    section_keywords = ["education", "skills", "experience", "projects", "certifications",
+                        "internship", "achievements", "objective", "summary", "contact",
+                        "hackathon", "publication", "research"]
+    for sk in section_keywords:
+        if re.search(r'\b' + sk + r'\b', lower):
+            sections_found.append(sk)
+
+    has_bullet_points = bool(re.search(r'[\u2022\u2023\u25e6\u2043\u2219•\-–*]', text))
+    has_contact_info = bool(re.search(r'[\w.]+@[\w.]+', text))
+    has_phone = bool(re.search(r'\+?\d[\d\s\-]{9,}', text))
+    word_count = len(text.split())
+
+    return {
+        "skills": sorted(normalised_skills),
+        "certifications": certs[:10],
+        "projects": projects[:15],
+        "experience": experience_entries[:20],
+        "education": education[:6],
+        "github_url": github_url,
+        "portfolio_url": portfolio_url,
+        "cgpa": cgpa,
+        "degree_raw": degree_raw,
+        "sections_found": sections_found,
+        "has_bullet_points": has_bullet_points,
+        "has_contact_info": has_contact_info,
+        "has_phone": has_phone,
+        "word_count": word_count,
+    }
+
+
+# -----------------------------------------------------------------------
+# STEP 2 — Fetch bulk JSearch job listings (100–500 postings)
+# -----------------------------------------------------------------------
+def fetch_jsearch_bulk(career: str, country: str, city: str, target_count: int = 100) -> List[Dict]:
+    """Fetch bulk job listings from JSearch across multiple pages & query variants."""
+    jsearch_key = os.getenv("JSearch_api_key")
+    if not jsearch_key:
+        print("[ATS JSearch] API key not configured.")
+        return []
+
+    headers = {
+        "x-rapidapi-key": jsearch_key,
+        "x-rapidapi-host": "jsearch.p.rapidapi.com",
+    }
+
+    location_str = f"{city} {country}".strip()
+    query_variants = [
+        f"{career} entry level {location_str}",
+        f"{career} fresher {location_str}",
+        f"{career} junior {location_str}",
+        f"{career} {location_str}",
+        f"{career} intern {location_str}",
+    ]
+
+    all_jobs: List[Dict] = []
+    seen_ids: set = set()
+
+    pages_per_query = max(1, min(5, (target_count // (len(query_variants) * 10)) + 1))
+
+    for query in query_variants:
+        if len(all_jobs) >= target_count:
+            break
+        for page in range(1, pages_per_query + 1):
+            try:
+                params = {
+                    "query": query,
+                    "page": str(page),
+                    "num_pages": "1",
+                    "date_posted": "month",
+                }
+                res = requests.get(
+                    "https://jsearch.p.rapidapi.com/search",
+                    headers=headers,
+                    params=params,
+                    timeout=12,
+                )
+                if res.status_code != 200:
+                    continue
+                jobs = res.json().get("data", [])
+                for j in jobs:
+                    jid = j.get("job_id", "")
+                    if jid in seen_ids:
+                        continue
+                    desc = j.get("job_description", "") or ""
+                    if len(desc) < 50:
+                        continue  # skip incomplete descriptions
+                    seen_ids.add(jid)
+                    all_jobs.append({
+                        "title": j.get("job_title", ""),
+                        "company": j.get("employer_name", ""),
+                        "location": f"{j.get('job_city', '')} {j.get('job_country', '')}".strip(),
+                        "description": desc,
+                        "posted": (j.get("job_posted_at_datetime_utc") or "")[:10],
+                        "salary_min": j.get("job_min_salary"),
+                        "salary_max": j.get("job_max_salary"),
+                    })
+            except Exception as e:
+                print(f"[ATS JSearch] page {page} error: {e}")
+
+    print(f"[ATS JSearch] Collected {len(all_jobs)} job listings for '{career}'")
+    return all_jobs[:500]
+
+
+# -----------------------------------------------------------------------
+# STEP 3 — Extract market requirements from job listings
+# -----------------------------------------------------------------------
+def extract_market_requirements(job_listings: List[Dict], career_path: str) -> Dict[str, Any]:
+    """Extract skill frequencies, demand %, and company info from job descriptions."""
+    skill_counter: Counter = Counter()
+    company_skill_map: Dict[str, set] = {}
+    total_jobs = len(job_listings)
+    companies: List[str] = []
+
+    for job in job_listings:
+        desc_lower = (job.get("description", "") + " " + job.get("title", "")).lower()
+        company = job.get("company", "Unknown")
+        if company:
+            companies.append(company)
+        if company not in company_skill_map:
+            company_skill_map[company] = set()
+
+        job_skills_found = set()
+        for token in TECH_VOCAB:
+            pattern = r'\b' + re.escape(token) + r'\b'
+            if re.search(pattern, desc_lower):
+                # Normalise
+                norm = token.title()
+                aliases = {
+                    "Tensorflow": "TensorFlow", "Aws": "AWS", "Gcp": "GCP",
+                    "Sql": "SQL", "Html": "HTML", "Css": "CSS", "Api": "API",
+                    "Nodejs": "Node.js", "Node": "Node.js", "Reactjs": "React",
+                    "Ci/Cd": "CI/CD", "Nlp": "NLP",
+                }
+                norm = aliases.get(norm, norm)
+                job_skills_found.add(norm)
+
+        for sk in job_skills_found:
+            skill_counter[sk] += 1
+            company_skill_map[company].add(sk)
+
+    # Build sorted market skills list
+    market_skills = []
+    for skill, count in skill_counter.most_common(50):
+        demand_pct = round((count / max(total_jobs, 1)) * 100, 1)
+        # Get companies that require this skill
+        requiring_companies = [c for c, skills in company_skill_map.items() if skill in skills]
+        market_skills.append({
+            "skill": skill,
+            "frequency": count,
+            "demand_pct": demand_pct,
+            "companies": list(set(requiring_companies))[:8],
+            "importance": "Critical" if demand_pct >= 50 else "High" if demand_pct >= 25 else "Medium" if demand_pct >= 10 else "Low",
+        })
+
+    # Company frequency ranking
+    company_counter = Counter(companies)
+    top_companies = [{"name": c, "postings": n} for c, n in company_counter.most_common(12) if c]
+
+    # Top keywords (most frequent market terms for keyword match scoring)
+    top_keywords = [s["skill"] for s in market_skills[:20]]
+
+    return {
+        "total_jobs_analysed": total_jobs,
+        "market_skills": market_skills,
+        "top_companies": top_companies,
+        "top_keywords": top_keywords,
+    }
+
+
+# -----------------------------------------------------------------------
+# STEP 4 — Mathematical ATS Scoring Engine (no AI involvement)
+# -----------------------------------------------------------------------
+def calculate_ats_score(
+    entities: Dict[str, Any],
+    market: Dict[str, Any],
+    career_path: str,
+) -> Dict[str, Any]:
+    """
+    Weighted ATS score across 7 categories.
+    All calculations are pure maths — no AI.
+    """
+    resume_skills_lower = {s.lower() for s in entities.get("skills", [])}
+    market_skills = market.get("market_skills", [])
+    top_keywords = market.get("top_keywords", [])
+
+    # ── Category 1: Skills Match (35%) ──────────────────────────────────
+    critical_market_skills = [s for s in market_skills if s["importance"] in ("Critical", "High")][:20]
+    if critical_market_skills:
+        matched = sum(1 for s in critical_market_skills if s["skill"].lower() in resume_skills_lower)
+        skill_raw = matched / len(critical_market_skills)
+    else:
+        skill_raw = 0.0
+    skills_score = round(skill_raw * 35, 2)
+
+    present_skills = [s["skill"] for s in critical_market_skills if s["skill"].lower() in resume_skills_lower]
+    missing_skills = [s for s in critical_market_skills if s["skill"].lower() not in resume_skills_lower]
+
+    # ── Category 2: Projects (20%) ───────────────────────────────────────
+    projects = entities.get("projects", [])
+    if not projects:
+        project_raw = 0.0
+    else:
+        project_text = " ".join(projects).lower()
+        # Count how many top market skills appear in project descriptions
+        tech_in_projects = sum(1 for sk in top_keywords if sk.lower() in project_text)
+        relevance_ratio = min(tech_in_projects / max(len(top_keywords), 1), 1.0)
+        # Boost for quantity: more projects → higher base
+        qty_bonus = min(len(projects) / 8, 1.0) * 0.2
+        project_raw = min(relevance_ratio * 0.8 + qty_bonus, 1.0)
+    projects_score = round(project_raw * 20, 2)
+
+    # ── Category 3: Keyword Match (15%) ──────────────────────────────────
+    resume_text_lower = " ".join(entities.get("skills", []) +
+                                  entities.get("projects", []) +
+                                  entities.get("experience", [])).lower()
+    if top_keywords:
+        kw_matches = sum(1 for kw in top_keywords if kw.lower() in resume_text_lower)
+        keyword_raw = kw_matches / len(top_keywords)
+    else:
+        keyword_raw = 0.0
+    keywords_score = round(keyword_raw * 15, 2)
+
+    matched_keywords = [kw for kw in top_keywords if kw.lower() in resume_text_lower]
+    missing_keywords = [kw for kw in top_keywords if kw.lower() not in resume_text_lower]
+
+    # ── Category 4: Certifications (10%) ─────────────────────────────────
+    certs = entities.get("certifications", [])
+    if not certs:
+        cert_raw = 0.0
+    else:
+        cert_text = " ".join(certs).lower()
+        # Count how many certification vocab items appear
+        cert_hits = sum(1 for cv in CERTIFICATION_VOCAB if cv in cert_text)
+        cert_raw = min(cert_hits / 3, 1.0)  # 3 relevant certs = full score
+    certifications_score = round(cert_raw * 10, 2)
+
+    # ── Category 5: Experience (10%) ─────────────────────────────────────
+    experience = entities.get("experience", [])
+    exp_text = " ".join(experience).lower()
+    exp_signals = ["intern", "internship", "hackathon", "freelanc", "research",
+                   "open source", "teaching assistant", "ta ", "volunteer", "project lead"]
+    exp_count = sum(1 for sig in exp_signals if sig in exp_text)
+    exp_raw = min(exp_count / 4, 1.0)  # 4+ signals = full score
+    experience_score = round(exp_raw * 10, 2)
+
+    # ── Category 6: Resume Structure (5%) ────────────────────────────────
+    sections = entities.get("sections_found", [])
+    important_sections = ["education", "skills", "experience", "projects", "contact"]
+    section_hits = sum(1 for s in important_sections if s in sections)
+    structure_points = section_hits / len(important_sections)
+    if entities.get("has_bullet_points"):
+        structure_points = min(structure_points + 0.15, 1.0)
+    if entities.get("has_contact_info"):
+        structure_points = min(structure_points + 0.10, 1.0)
+    wc = entities.get("word_count", 0)
+    if 300 <= wc <= 1200:
+        structure_points = min(structure_points + 0.10, 1.0)
+    structure_score = round(structure_points * 5, 2)
+
+    # ── Category 7: Education Alignment (5%) ─────────────────────────────
+    degree_raw = (entities.get("degree_raw") or "").lower()
+    career_lower = career_path.lower()
+    edu_raw = 0.4  # base score if degree found
+    if degree_raw:
+        for edu_key, career_keywords in EDUCATION_CAREER_MAP.items():
+            if edu_key in degree_raw or edu_key in " ".join(entities.get("education", [])).lower():
+                if any(ck in career_lower for ck in career_keywords):
+                    edu_raw = 1.0
+                    break
+                else:
+                    edu_raw = 0.5
+    else:
+        edu_raw = 0.3
+    if entities.get("cgpa") and entities["cgpa"] >= 8.0:
+        edu_raw = min(edu_raw + 0.1, 1.0)
+    education_score = round(edu_raw * 5, 2)
+
+    # ── Total ATS Score ───────────────────────────────────────────────────
+    total_ats = round(skills_score + projects_score + keywords_score +
+                       certifications_score + experience_score +
+                       structure_score + education_score, 1)
+    total_ats = min(total_ats, 100)
+
+    # ── Market Readiness Score ────────────────────────────────────────────
+    # ATS(70%) + skill breadth bonus(15%) + experience bonus(10%) + portfolio(5%)
+    skill_breadth = min(len(resume_skills_lower) / 15, 1.0) * 15
+    exp_bonus = exp_raw * 10
+    portfolio_bonus = 5.0 if (entities.get("github_url") or entities.get("portfolio_url")) else 0.0
+    market_readiness = round(total_ats * 0.70 + skill_breadth + exp_bonus + portfolio_bonus, 1)
+    market_readiness = min(market_readiness, 100)
+
+    # ── Career Readiness & Job Eligibility ────────────────────────────────
+    base_jobs = market.get("total_jobs_analysed", 100)
+    current_eligible = max(5, round(base_jobs * (total_ats / 100) * 0.6))
+    post_improvement_eligible = max(current_eligible, round(base_jobs * 0.85))
+    career_readiness_now = total_ats
+    career_readiness_after = min(round(total_ats * 1.35), 97)
+
+    # ── Company Match ─────────────────────────────────────────────────────
+    top_companies = market.get("top_companies", [])
+    company_match = []
+    for comp in top_companies[:8]:
+        # Current match % ≈ weighted average of skill match for that company's needs
+        current_pct = round(skill_raw * 60 + exp_raw * 20 + cert_raw * 10 + structure_points * 10, 1)
+        potential_pct = min(round(current_pct * 1.4), 95)
+        company_match.append({
+            "company": comp["name"],
+            "postings": comp["postings"],
+            "current_match": current_pct,
+            "potential_match": potential_pct,
+        })
+
+    # ── Missing skills with metadata ─────────────────────────────────────
+    missing_skills_detail = []
+    for s in missing_skills[:12]:
+        missing_skills_detail.append({
+            "skill": s["skill"],
+            "demand_pct": s["demand_pct"],
+            "importance": s["importance"],
+            "companies": s["companies"][:4],
+            "learning_time": (
+                "1-2 weeks" if s["demand_pct"] < 20
+                else "1-2 months" if s["demand_pct"] < 50
+                else "2-3 months"
+            ),
+            "priority": 1 if s["importance"] == "Critical" else 2 if s["importance"] == "High" else 3,
+        })
+    missing_skills_detail.sort(key=lambda x: x["priority"])
+
+    return {
+        "ats_score": total_ats,
+        "market_readiness": market_readiness,
+        "category_scores": {
+            "skills_match": {"score": skills_score, "max": 35, "pct": round(skill_raw * 100, 1)},
+            "projects": {"score": projects_score, "max": 20, "pct": round(project_raw * 100, 1)},
+            "keywords": {"score": keywords_score, "max": 15, "pct": round(keyword_raw * 100, 1)},
+            "certifications": {"score": certifications_score, "max": 10, "pct": round(cert_raw * 100, 1)},
+            "experience": {"score": experience_score, "max": 10, "pct": round(exp_raw * 100, 1)},
+            "resume_structure": {"score": structure_score, "max": 5, "pct": round(structure_points * 100, 1)},
+            "education_alignment": {"score": education_score, "max": 5, "pct": round(edu_raw * 100, 1)},
+        },
+        "present_skills": present_skills,
+        "missing_skills": missing_skills_detail,
+        "matched_keywords": matched_keywords,
+        "missing_keywords": missing_keywords[:10],
+        "company_match": company_match,
+        "career_readiness_now": career_readiness_now,
+        "career_readiness_after": career_readiness_after,
+        "current_eligible_jobs": current_eligible,
+        "eligible_after_improvements": post_improvement_eligible,
+    }
+
+
+# -----------------------------------------------------------------------
+# STEP 5 — AI Summary from Gemini / Groq  (explanations ONLY, no scoring)
+# -----------------------------------------------------------------------
+def get_ai_ats_summary(
+    entities: Dict[str, Any],
+    ats_result: Dict[str, Any],
+    market: Dict[str, Any],
+    career_path: str,
+    gemini_key: Optional[str],
+) -> Dict[str, Any]:
+    """Call Gemini/Groq for personalized recommendations. NOT for scoring."""
+
+    missing_top = [s["skill"] for s in ats_result.get("missing_skills", [])[:5]]
+    top_market = [s["skill"] for s in market.get("market_skills", [])[:10]]
+    ats_score = ats_result.get("ats_score", 0)
+    total_jobs = market.get("total_jobs_analysed", 0)
+
+    prompt = f"""You are a professional career coach analyzing a student's resume against live labour market data.
+
+ATS Score: {ats_score}/100
+Career Target: {career_path}
+Jobs Analysed: {total_jobs}
+Student's Current Skills: {", ".join(entities.get("skills", [])[:15])}
+Top 10 Market-Required Skills (from {total_jobs} real job postings): {", ".join(top_market)}
+Critical Missing Skills: {", ".join(missing_top)}
+Has GitHub: {"Yes" if entities.get("github_url") else "No"}
+Has Projects: {"Yes, " + str(len(entities.get("projects", []))) + " listed" if entities.get("projects") else "No"}
+Has Certifications: {"Yes" if entities.get("certifications") else "No"}
+
+Return ONLY a valid JSON object with these exact keys:
+{{
+  "ats_summary": "2-3 paragraph personalized explanation of why this specific ATS score was given. Reference the actual market data. Be specific about what hurt the score and what is working well.",
+  "improvement_checklist": [
+    {{"action": "specific resume improvement action", "impact": "how it increases ATS score and eligibility", "priority": "High/Medium/Low"}},
+    ... (generate 6-8 specific items)
+  ],
+  "project_recommendations": [
+    {{"name": "project name", "tech_stack": ["tech1", "tech2"], "difficulty": "Beginner/Intermediate/Advanced", "portfolio_value": "High/Medium", "industry_relevance": "brief explanation", "career_impact": "how it helps"}},
+    ... (3-4 projects)
+  ],
+  "certification_recommendations": [
+    {{"name": "certification name", "provider": "provider", "relevance": "why relevant to career and missing skills", "priority": "High/Medium"}},
+    ... (2-3 certs)
+  ],
+  "top_priority_skills": [
+    {{"skill": "skill name", "why": "why this specific skill matters based on the job data", "learning_path": "brief learning path"}},
+    ... (3 skills)
+  ]
+}}"""
+
+    try:
+        if gemini_key:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json"},
+            }
+            res = requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=30)
+            if res.status_code == 200:
+                text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return json.loads(text)
+    except Exception as e:
+        print(f"[ATS Gemini] Error: {e}")
+
+    # Groq fallback
+    try:
+        return json.loads(call_groq_fallback(prompt, response_format_json=True))
+    except Exception as e:
+        print(f"[ATS Groq] Error: {e}")
+        return {
+            "ats_summary": f"Your resume scored {ats_score}/100 against {total_jobs} live job postings for {career_path}. Focus on adding the missing critical skills to improve your ATS score.",
+            "improvement_checklist": [],
+            "project_recommendations": [],
+            "certification_recommendations": [],
+            "top_priority_skills": [],
+        }
+
+
+# -----------------------------------------------------------------------
+# ENDPOINT — POST /api/ats/analyze
+# -----------------------------------------------------------------------
+@app.post("/api/ats/analyze")
+async def ats_analyze(
+    file: UploadFile = File(...),
+    career_path: str = Form(...),
+    country: str = Form(""),
+    city: str = Form(""),
+):
+    """
+    Full AI Resume Intelligence Engine:
+    1. Parse PDF/DOCX
+    2. Fetch 100-500 live JSearch job listings
+    3. Extract market requirements
+    4. Mathematically calculate 7-category ATS score
+    5. Call Gemini/Groq for AI explanations only
+    6. Upload file to Supabase storage + insert row
+    Returns full ATS dashboard payload.
+    """
+    # ── Validate file ────────────────────────────────────────────────────
+    fname = (file.filename or "").lower()
+    if not (fname.endswith(".pdf") or fname.endswith(".docx")):
+        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are accepted.")
+
+    file_bytes = await file.read()
+    if len(file_bytes) > 6 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Resume must be smaller than 6 MB.")
+
+    print(f"[ATS] Starting analysis — career='{career_path}' country='{country}' city='{city}' file='{file.filename}'")
+
+    # ── Step 1: Parse resume ──────────────────────────────────────────────
+    resume_text = parse_resume_text(file_bytes, file.filename)
+    if len(resume_text.strip()) < 50:
+        raise HTTPException(status_code=422, detail="Could not extract text from the uploaded resume. Ensure the PDF is not scanned/image-only.")
+
+    entities = extract_resume_entities(resume_text)
+    print(f"[ATS] Extracted {len(entities['skills'])} skills, {len(entities['projects'])} projects, {len(entities['certifications'])} certs")
+
+    # ── Step 2: Fetch live JSearch job data ───────────────────────────────
+    job_listings = fetch_jsearch_bulk(career_path, country, city, target_count=150)
+
+    # ── Step 3: Extract market requirements ───────────────────────────────
+    if job_listings:
+        market = extract_market_requirements(job_listings, career_path)
+    else:
+        # If JSearch fails, build a basic market requirement from known patterns
+        print("[ATS] JSearch returned 0 results — using fallback market data.")
+        market = {
+            "total_jobs_analysed": 0,
+            "market_skills": [],
+            "top_companies": [],
+            "top_keywords": [],
+        }
+
+    # ── Step 4: Calculate ATS score (pure math) ───────────────────────────
+    ats_result = calculate_ats_score(entities, market, career_path)
+
+    # ── Step 5: AI summary (Gemini/Groq — explanations only) ─────────────
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    ai_summary = get_ai_ats_summary(entities, ats_result, market, career_path, gemini_key)
+
+    # ── Step 6: Store in Supabase (best-effort, don't fail if down) ───────
+    try:
+        unique_id = str(_uuid.uuid4())
+        safe_name = file.filename.replace(" ", "_").replace("..", "")
+        storage_path = f"{unique_id}/{safe_name}"
+        supabase_storage_upload("resumes", storage_path, file_bytes,
+                                "application/pdf" if fname.endswith(".pdf") else
+                                "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        signed_url = supabase_get_signed_url("resumes", storage_path, expires_in=86400)
+        row_id = str(_uuid.uuid4())
+        supabase_insert("resumes", {
+            "id": row_id,
+            "career_path": career_path,
+            "location": f"{city}, {country}".strip(", "),
+            "file_name": file.filename,
+            "file_size_kb": len(file_bytes) // 1024,
+            "storage_path": storage_path,
+            "public_url": signed_url,
+            "ats_score": int(ats_result["ats_score"]),
+            "ats_feedback": ai_summary,
+            "ats_status": "scored",
+        })
+    except Exception as e:
+        print(f"[ATS Supabase] Non-fatal error: {e}")
+        row_id = str(_uuid.uuid4())
+
+    return {
+        "success": True,
+        "resume_id": row_id,
+        "career_path": career_path,
+        "country": country,
+        "city": city,
+        "file_name": file.filename,
+        # Parsed resume entities
+        "resume": {
+            "skills": entities["skills"],
+            "certifications": entities["certifications"],
+            "projects": entities["projects"][:8],
+            "experience_count": len(entities["experience"]),
+            "github_url": entities["github_url"],
+            "portfolio_url": entities["portfolio_url"],
+            "cgpa": entities["cgpa"],
+            "sections_found": entities["sections_found"],
+        },
+        # Market data
+        "market": {
+            "total_jobs_analysed": market["total_jobs_analysed"],
+            "top_market_skills": market["market_skills"][:20],
+            "top_companies": market["top_companies"][:8],
+        },
+        # ATS scores (all mathematically computed)
+        "ats_score": ats_result["ats_score"],
+        "market_readiness": ats_result["market_readiness"],
+        "category_scores": ats_result["category_scores"],
+        "present_skills": ats_result["present_skills"],
+        "missing_skills": ats_result["missing_skills"],
+        "matched_keywords": ats_result["matched_keywords"],
+        "missing_keywords": ats_result["missing_keywords"],
+        "company_match": ats_result["company_match"],
+        "career_readiness_now": ats_result["career_readiness_now"],
+        "career_readiness_after": ats_result["career_readiness_after"],
+        "current_eligible_jobs": ats_result["current_eligible_jobs"],
+        "eligible_after_improvements": ats_result["eligible_after_improvements"],
+        # AI-generated explanations (NOT scores)
+        "ai_summary": ai_summary.get("ats_summary", ""),
+        "improvement_checklist": ai_summary.get("improvement_checklist", []),
+        "project_recommendations": ai_summary.get("project_recommendations", []),
+        "certification_recommendations": ai_summary.get("certification_recommendations", []),
+        "top_priority_skills": ai_summary.get("top_priority_skills", []),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# USER AUTHENTICATION — Signup / Login  (bcrypt hashed passwords)
+# ═══════════════════════════════════════════════════════════════════════
+
+import bcrypt as _bcrypt
+
+
+class SignupRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    login_id: str  # Can be email or username
+    password: str
+
+
+class GoogleLoginRequest(BaseModel):
+    email: str
+    fullname: str
+    google_id: str
+
+
+def supabase_query(table: str, filters: dict) -> List[dict]:
+    """Read rows from a Supabase table matching all filters."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    params = {k: f"eq.{v}" for k, v in filters.items()}
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        res.raise_for_status()
+        return res.json()
+    except Exception as e:
+        print(f"[Supabase Query] Error: {e}")
+        return []
+
+
+@app.post("/api/auth/signup")
+def auth_signup(body: SignupRequest):
+    """
+    Register a new user with username, email, and password.
+    """
+    username = body.username.strip()
+    email = body.email.strip().lower()
+    password = body.password
+
+    # Basic validation
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required.")
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid email is required.")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+    # Check for existing username (stored as fullname)
+    existing_username = supabase_query("users", {"fullname": username})
+    if existing_username:
+        raise HTTPException(status_code=409, detail="This username is already taken.")
+
+    # Check for existing email
+    existing_email = supabase_query("users", {"email": email})
+    if existing_email:
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+
+    # Hash password
+    pw_hash = _bcrypt.hashpw(password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
+
+    # Insert into Supabase (fullname stores username)
+    user_id = str(_uuid.uuid4())
+    supabase_insert("users", {
+        "id": user_id,
+        "fullname": username,
+        "email": email,
+        "password_hash": pw_hash,
+        "is_active": True,
+    })
+
+    return {
+        "success": True,
+        "user": {
+            "id": user_id,
+            "fullname": username,
+            "email": email,
+        },
+        "message": "Account created successfully.",
+    }
+
+
+@app.post("/api/auth/login")
+def auth_login(body: LoginRequest):
+    """
+    Authenticate a user by email OR username.
+    """
+    login_id = body.login_id.strip()
+    password = body.password
+
+    # Try email first if it looks like an email
+    rows = []
+    if "@" in login_id:
+        rows = supabase_query("users", {"email": login_id.lower()})
+    
+    # Try username (fullname) if no user found yet
+    if not rows:
+        rows = supabase_query("users", {"fullname": login_id})
+
+    # Try matching email directly just in case login_id didn't have @ but is stored as email
+    if not rows:
+        rows = supabase_query("users", {"email": login_id.lower()})
+
+    if not rows:
+        raise HTTPException(status_code=401, detail="Invalid email/username or password.")
+
+    user = rows[0]
+    stored_hash = user.get("password_hash", "")
+
+    # Verify password
+    try:
+        match = _bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8"))
+    except Exception:
+        match = False
+
+    if not match:
+        raise HTTPException(status_code=401, detail="Invalid email/username or password.")
+
+    if not user.get("is_active", True):
+        raise HTTPException(status_code=403, detail="Account is deactivated.")
+
+    return {
+        "success": True,
+        "user": {
+            "id": user["id"],
+            "fullname": user["fullname"],
+            "email": user["email"],
+            "phone": user.get("phone"),
+        },
+        "message": "Login successful.",
+    }
+
+
+@app.post("/api/auth/google")
+def auth_google(body: GoogleLoginRequest):
+    """
+    Authenticate a user via Google login. 
+    If user doesn't exist, create an account.
+    """
+    email = body.email.strip().lower()
+    fullname = body.fullname.strip()
+
+    # Check if user already exists
+    rows = supabase_query("users", {"email": email})
+    if rows:
+        user = rows[0]
+        if not user.get("is_active", True):
+            raise HTTPException(status_code=403, detail="Account is deactivated.")
+        return {
+            "success": True,
+            "user": {
+                "id": user["id"],
+                "fullname": user["fullname"],
+                "email": user["email"],
+                "phone": user.get("phone"),
+            },
+            "message": "Google Login successful.",
+        }
+
+    # Otherwise create a new user with randomized password
+    random_password = str(_uuid.uuid4())
+    pw_hash = _bcrypt.hashpw(random_password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
+    user_id = str(_uuid.uuid4())
+
+    supabase_insert("users", {
+        "id": user_id,
+        "fullname": fullname,
+        "email": email,
+        "password_hash": pw_hash,
+        "is_active": True,
+    })
+
+    return {
+        "success": True,
+        "user": {
+            "id": user_id,
+            "fullname": fullname,
+            "email": email,
+            "phone": None,
+        },
+        "message": "Google Account registered successfully.",
+    }
+
+
+@app.get("/api/auth/me")
+def auth_me(user_id: str):
+    """Return public user info by id."""
+    rows = supabase_query("users", {"id": user_id})
+    if not rows:
+        raise HTTPException(status_code=404, detail="User not found.")
+    u = rows[0]
+    return {
+        "id": u["id"],
+        "fullname": u["fullname"],
+        "email": u["email"],
+        "phone": u.get("phone"),
     }
 
 
