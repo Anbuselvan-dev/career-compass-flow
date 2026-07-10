@@ -67,15 +67,18 @@ function CategoryBar({ label, score, max, pct, color }) {
   );
 }
 
-export function ResumeATS({ answers, careerPaths }) {
-  const [phase, setPhase] = useState("form"); // form | analyzing | dashboard
+export function ResumeATS({ answers, careerPaths, result: externalResult, setResult: externalSetResult }) {
+  const [localResult, setLocalResult] = useState(null);
+  const result = externalResult !== undefined ? externalResult : localResult;
+  const setResult = externalSetResult !== undefined ? externalSetResult : setLocalResult;
+
+  const [phase, setPhase] = useState(result ? "dashboard" : "form"); // form | analyzing | dashboard
   const [resumeFile, setResumeFile] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [careerTarget, setCareerTarget] = useState(careerPaths?.[0]?.title || "");
   const [country, setCountry] = useState(answers?.location?.country || "");
   const [city, setCity] = useState(answers?.location?.city || "");
   const [error, setError] = useState(null);
-  const [result, setResult] = useState(null);
   const [activeSection, setActiveSection] = useState("overview");
   const fileInputRef = useRef(null);
 

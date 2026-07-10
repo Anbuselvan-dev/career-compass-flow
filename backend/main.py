@@ -67,6 +67,7 @@ class RedesignedAnalysisRequest(BaseModel):
     values_ranking: List[str]
     anti_goals: List[str]
     user_id: Optional[str] = None
+    candidate_name: Optional[str] = "Student"
 
 
 def call_groq_fallback(prompt: str, response_format_json: bool = True) -> str:
@@ -425,13 +426,11 @@ Summary: {analysis.get("summary", "")}
 
     # 4. Persist to Supabase (non-blocking, errors are logged not raised)
     report_data = {
-        "candidate_name": "Student",
+        "candidate_name": request.candidate_name or "Student",
         "answers": answers,
         "analysis": analysis,
         "jobs": jobs,
     }
-    if request.user_id:
-        report_data["user_id"] = request.user_id
 
     supabase_insert("career_reports", report_data)
 
@@ -439,7 +438,7 @@ Summary: {analysis.get("summary", "")}
 
 
 @app.get("/api/auth/latest-report")
-def get_latest_report(user_id: str):
+def get_latest_report(username: str):
     """
     Fetch the latest career report for a specific user to restore session.
     """
@@ -452,9 +451,9 @@ def get_latest_report(user_id: str):
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
     }
-    # Query matching user_id, order by created_at descending, limit to 1
+    # Query matching candidate_name, order by created_at descending, limit to 1
     params = {
-        "user_id": f"eq.{user_id}",
+        "candidate_name": f"eq.{username}",
         "order": "created_at.desc",
         "limit": "1"
     }
@@ -1764,30 +1763,91 @@ async def generate_roadmap_endpoint(request: RoadmapRequest):
     return roadmap_data
 
 
+def get_mock_market_data(career_path: str, location: str) -> Dict[str, Any]:
+    """Generate deterministic, career-specific realistic mock data as fallback."""
+    import hashlib
+    # Create stable hash seed from input params
+    seed_str = f"{career_path.lower()}|{location.lower()}"
+    h = int(hashlib.md5(seed_str.encode("utf-8")).hexdigest(), 16)
+
+    # Determine premiums based on path name
+    cp = career_path.lower()
+    is_premium = any(x in cp for x in ("ai", "machine learning", "data scientist", "blockchain", "cloud", "devops", "software", "deep learning"))
+    is_qa = "qa" in cp or "quality" in cp or "testing" in cp
+    is_junior = "junior" in cp or "associate" in cp or "entry" in cp
+
+    base_mult = 1.3 if is_premium else (0.85 if is_qa else 1.0)
+    if is_junior:
+        base_mult *= 0.82
+
+    entry_base = int(58000 * base_mult + (h % 12) * 1000)
+    mid_base = int(88000 * base_mult + ((h >> 4) % 15) * 1500)
+    senior_base = int(130000 * base_mult + ((h >> 8) % 20) * 2000)
+
+    # Growth rate (Premium roles grow faster, QA/Admin grows slower)
+    growth_rate = 14 if is_premium else (6 if is_qa else 9)
+    t2023 = 100 + (h % 4) + growth_rate
+    t2024 = t2023 + ((h >> 2) % 4) + growth_rate
+    t2025 = t2024 + ((h >> 4) % 4) + growth_rate
+    t2026 = t2025 + ((h >> 6) % 4) + growth_rate
+
+    # Region comparison offsets
+    selected_sal = int(mid_base * (0.88 + ((h >> 10) % 6) * 0.04))
+    national_sal = int(mid_base * 1.0)
+    techhub_sal = int(mid_base * 1.22)
+    global_sal = int(mid_base * 1.08)
+
+    return {
+        "career": career_path,
+        "salary_ranges": {
+            "entry": f"${entry_base//1000}k - ${(entry_base + 12000)//1000}k",
+            "mid": f"${mid_base//1000}k - ${(mid_base + 22000)//1000}k",
+            "senior": f"${senior_base//1000}k - ${(senior_base + 32000)//1000}k"
+        },
+        "historical_trend": [
+            {"year": "2022", "Index": 100},
+            {"year": "2023", "Index": t2023},
+            {"year": "2024", "Index": t2024},
+            {"year": "2025", "Index": t2025},
+            {"year": "2026", "Index": t2026}
+        ],
+        "regional_comparison": [
+            {"region": "Selected Region", "salary": selected_sal},
+            {"region": "National Average", "salary": national_sal},
+            {"region": "Tech Hub Average", "salary": techhub_sal},
+            {"region": "Global Average", "salary": global_sal}
+        ]
+    }
+
+
 def get_market_data(career_path: str, location: str, api_key: str) -> Dict[str, Any]:
     prompt = f"""You are a Career Architect and Labour Market Analyst.
-Provide standardized market data for the career path of '{career_path}' in the region of '{location if location else "Global"}'.
+Provide standardized, highly realistic, and field-specific labour market data for the career path of '{career_path}' in the region of '{location if location else "Global"}'.
+
+Calculate entry, mid, and senior salary ranges reflecting actual market rates. 
+For the historical hiring demand trend index, assume 2022 has a base index of 100. Calculate indices for 2023, 2024, 2025, and 2026 that represent realistic growth rates for this specific career path (e.g. cutting-edge AI fields should grow steeply, QA or mature tech sectors should grow moderately, and sunset fields should be flat).
+Similarly, calculate realistic annual salaries in USD for the region comparison.
 
 Return ONLY a raw JSON object (no markdown, no code fences):
 {{
   "career": "{career_path}",
   "salary_ranges": {{
-    "entry": "$65k - $80k",
-    "mid": "$95k - $125k",
-    "senior": "$140k - $180k"
+    "entry": "CalculateEntryLevelSalaryRange (e.g. $70k - $85k)",
+    "mid": "CalculateMidLevelSalaryRange (e.g. $100k - $125k)",
+    "senior": "CalculateSeniorLevelSalaryRange (e.g. $145k - $180k)"
   }},
   "historical_trend": [
     {{"year": "2022", "Index": 100}},
-    {{"year": "2023", "Index": 115}},
-    {{"year": "2024", "Index": 128}},
-    {{"year": "2025", "Index": 142}},
-    {{"year": "2026", "Index": 160}}
+    {{"year": "2023", "Index": 105}},
+    {{"year": "2024", "Index": 112}},
+    {{"year": "2025", "Index": 120}},
+    {{"year": "2026", "Index": 130}}
   ],
   "regional_comparison": [
     {{"region": "Selected Region", "salary": 85000}},
-    {{"region": "National Average", "salary": 92000}},
-    {{"region": "Tech Hub Average", "salary": 110000}},
-    {{"region": "Global Average", "salary": 98000}}
+    {{"region": "National Average", "salary": 90000}},
+    {{"region": "Tech Hub Average", "salary": 115000}},
+    {{"region": "Global Average", "salary": 95000}}
   ]
 }}"""
 
@@ -1796,24 +1856,8 @@ Return ONLY a raw JSON object (no markdown, no code fences):
         try:
             return json.loads(call_groq_fallback(prompt, response_format_json=True))
         except Exception as groq_err:
-            print(f"[Groq Market Data Fallback] Failed: {groq_err}. Using mock values.")
-            return {
-                "career": career_path,
-                "salary_ranges": {"entry": "$60k - $75k", "mid": "$90k - $115k", "senior": "$130k - $160k"},
-                "historical_trend": [
-                    {"year": "2022", "Index": 100},
-                    {"year": "2023", "Index": 110},
-                    {"year": "2024", "Index": 120},
-                    {"year": "2025", "Index": 135},
-                    {"year": "2026", "Index": 150}
-                ],
-                "regional_comparison": [
-                    {"region": "Selected Region", "salary": 75000},
-                    {"region": "National Average", "salary": 82000},
-                    {"region": "Tech Hub Average", "salary": 98000},
-                    {"region": "Global Average", "salary": 88000}
-                ]
-            }
+            print(f"[Groq Market Data Fallback] Failed: {groq_err}. Using dynamic seeded mock.")
+            return get_mock_market_data(career_path, location)
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
@@ -1833,24 +1877,8 @@ Return ONLY a raw JSON object (no markdown, no code fences):
         try:
             return json.loads(call_groq_fallback(prompt, response_format_json=True))
         except Exception as groq_err:
-            print(f"[Groq Market Data Fallback] Failed: {groq_err}. Using mock values.")
-            return {
-                "career": career_path,
-                "salary_ranges": {"entry": "$60k - $75k", "mid": "$90k - $115k", "senior": "$130k - $160k"},
-                "historical_trend": [
-                    {"year": "2022", "Index": 100},
-                    {"year": "2023", "Index": 110},
-                    {"year": "2024", "Index": 120},
-                    {"year": "2025", "Index": 135},
-                    {"year": "2026", "Index": 150}
-                ],
-                "regional_comparison": [
-                    {"region": "Selected Region", "salary": 75000},
-                    {"region": "National Average", "salary": 82000},
-                    {"region": "Tech Hub Average", "salary": 98000},
-                    {"region": "Global Average", "salary": 88000}
-                ]
-            }
+            print(f"[Groq Market Data Fallback] Failed: {groq_err}. Using dynamic seeded mock.")
+            return get_mock_market_data(career_path, location)
 
 class MarketDataRequest(BaseModel):
     career_path: str

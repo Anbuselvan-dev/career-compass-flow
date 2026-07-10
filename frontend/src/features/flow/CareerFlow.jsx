@@ -18,11 +18,13 @@ export function CareerFlow({ user }) {
 
   // Restore previous session if career report exists in Supabase
   useEffect(() => {
-    if (!user?.id) return;
+    if (!user) return;
+    const username = user.fullname || user.email;
+    if (!username) return;
 
     const restoreSession = async () => {
       try {
-        const url = `${import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"}/api/auth/latest-report?user_id=${user.id}`;
+        const url = `${import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"}/api/auth/latest-report?username=${encodeURIComponent(username)}`;
         const res = await fetch(url);
         if (res.ok) {
           const data = await res.json();
@@ -37,6 +39,10 @@ export function CareerFlow({ user }) {
               });
               setSubmitted(true);
             }
+          } else {
+            // No previous report found for this user - reset submitted state so they can fill it
+            setSubmitted(false);
+            setResult(null);
           }
         }
       } catch (e) {
@@ -45,7 +51,7 @@ export function CareerFlow({ user }) {
     };
 
     restoreSession();
-  }, [user?.id]);
+  }, [user]);
 
 
   const getSuggestedSkills = (degree) => {
@@ -182,7 +188,7 @@ export function CareerFlow({ user }) {
       const payload = {
         ...answers,
         academic: cleanedAcademic,
-        user_id: user?.id || null
+        candidate_name: user?.fullname || user?.email || "Student"
       };
 
       const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"}/api/analyze`, {

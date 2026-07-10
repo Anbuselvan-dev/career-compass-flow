@@ -44,6 +44,7 @@ import {
 } from "recharts";
 import { ProgressRoadmap } from "./ProgressRoadmap";
 import { ResumeATS } from "./ResumeATS";
+import { ExecutiveSummary } from "./ExecutiveSummary";
 
 export function CareerReport({ analysis, jobs, answers, onRestart }) {
   const {
@@ -69,7 +70,8 @@ export function CareerReport({ analysis, jobs, answers, onRestart }) {
   const [skillGapLoading, setSkillGapLoading] = useState(false);
   const [skillGapError, setSkillGapError] = useState(null);
 
-  // State for Resume ATS tab — managed inside ResumeATS component now
+  // Lifted state for Resume ATS tab
+  const [atsResult, setAtsResult] = useState(null);
 
   useEffect(() => {
     if (activeTab === "market" && selectedPath) {
@@ -217,6 +219,16 @@ export function CareerReport({ analysis, jobs, answers, onRestart }) {
           >
             <FileBadge className="h-4 w-4" />
             Resume ATS
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("summary")}
+            className={`flex items-center gap-1.5 px-4 py-2.5 rounded-xl font-bold transition-all ${
+              activeTab === "summary" ? "bg-primary text-primary-foreground shadow-soft" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Sparkles className="h-4 w-4" />
+            Executive Summary
           </button>
         </div>
       </div>
@@ -752,7 +764,32 @@ export function CareerReport({ analysis, jobs, answers, onRestart }) {
             exit={{ opacity: 0, y: -10 }}
             transition={{ duration: 0.3 }}
           >
-            <ResumeATS answers={answers} careerPaths={careerPaths} />
+            <ResumeATS
+              answers={answers}
+              careerPaths={careerPaths}
+              result={atsResult}
+              setResult={setAtsResult}
+            />
+          </motion.div>
+        )}
+
+        {/* TAB 7: Executive Summary */}
+        {activeTab === "summary" && (
+          <motion.div
+            key="summary"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.3 }}
+          >
+            <ExecutiveSummary
+              answers={answers}
+              analysis={analysis}
+              jobs={jobs}
+              marketData={marketData}
+              skillGapData={skillGapData}
+              atsResult={atsResult}
+            />
           </motion.div>
         )}
       </AnimatePresence>
