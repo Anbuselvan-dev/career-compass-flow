@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { CareerFlow } from "@/features/flow/CareerFlow";
+import { AppShell } from "@/features/auth/AppShell";
 
 export const Route = createFileRoute("/")({
-  component: CareerFlow,
+  component: AppShell,
 });

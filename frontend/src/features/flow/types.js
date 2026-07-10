@@ -1,22 +1,26 @@
 export const initialAnswers = {
-  basicInfo: { name: "", gender: "", ageRange: "" },
-  education: { status: "", fieldOfStudy: "", institutionType: "" },
-  workExperience: { hasExperience: "", years: "", type: "" },
-  strengthsInterests: { primaryStrength: "", energizingTasks: "" },
-  satisfaction: { duringWork: "", afterWork: "" },
-  preferredRole: { freeText: "", category: "" },
-  cognitiveProfile: { selections: [], skipped: false },
-  coreCharacter: { openResponse: "" },
+  academic: {
+    degree: "",
+    current_year: "",
+    cgpa: ""
+  },
+  technical_skills: [],
+  interests: [],
+  preferred_career: "",
+  location: {
+    country: "",
+    city: "",
+    remote_ok: false
+  },
+  priority: "",
+  values_ranking: ["autonomy", "impact", "stability", "recognition", "mastery", "compensation"],
+  anti_goals: []
 };
 
 export const STEP_TITLES = [
-  "The basics",
-  "Your education",
-  "Work experience",
-  "Strengths & interests",
-  "What matters to you",
-  "A role in mind?",
-  "How your mind works",
-  "In your own words",
-  "Review & submit",
+  "Academic Profile",
+  "Technical Skills",
+  "Interests & Direction",
+  "Preferences & Values",
+  "Practical Constraints",
 ];
