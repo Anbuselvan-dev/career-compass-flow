@@ -13,6 +13,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ─────────────────────────────────────────────────────────────
+# IN-MEMORY RESPONSE CACHE (TTL = 30 minutes)
+# Prevents repeat API calls for same career path within a session
+# ─────────────────────────────────────────────────────────────
+import time as _time
+_CACHE: dict = {}          # key -> (timestamp, result)
+_CACHE_TTL = 1800          # 30 minutes
+
+def _cache_get(key: str):
+    entry = _CACHE.get(key)
+    if entry and (_time.time() - entry[0]) < _CACHE_TTL:
+        print(f"[Cache HIT] {key[:60]}")
+        return entry[1]
+    return None
+
+def _cache_set(key: str, value):
+    _CACHE[key] = (_time.time(), value)
+    print(f"[Cache SET] {key[:60]}")
+
 app = FastAPI(title="Career Compass Flow API")
 
 app.add_middleware(
@@ -70,30 +89,53 @@ class RedesignedAnalysisRequest(BaseModel):
     candidate_name: Optional[str] = "Student"
 
 
+def _call_groq_with_models(key: str, prompt: str, response_format_json: bool) -> str:
+    """Try multiple Groq models in order so a single model's rate limit doesn't block all fallbacks."""
+    models = [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "gemma2-9b-it",
+    ]
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    last_err = None
+    for model in models:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.2,
+        }
+        if response_format_json:
+            payload["response_format"] = {"type": "json_object"}
+        try:
+            res = requests.post(url, headers=headers, json=payload, timeout=30)
+            if res.status_code == 429:
+                print(f"[Groq] Model {model} rate-limited (429), trying next...")
+                last_err = Exception(f"429 on {model}")
+                continue
+            res.raise_for_status()
+            return res.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"[Groq] Model {model} failed: {e}")
+            last_err = e
+    raise last_err or Exception("All Groq models exhausted")
+
+
 def call_groq_fallback(prompt: str, response_format_json: bool = True) -> str:
+    """Group A fallback (Career Analysis, Skill Gap, Roadmap) — uses GROQ_API_KEY + multi-model."""
     groq_key = os.getenv("GROQ_API_KEY")
     if not groq_key:
-        print("[Groq Fallback] GROQ_API_KEY is not set.")
         raise Exception("GROQ_API_KEY is not configured.")
-        
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {groq_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.2
-    }
-    if response_format_json:
-        payload["response_format"] = {"type": "json_object"}
-        
-    res = requests.post(url, headers=headers, json=payload, timeout=25)
-    res.raise_for_status()
-    return res.json()["choices"][0]["message"]["content"]
+    return _call_groq_with_models(groq_key, prompt, response_format_json)
+
+
+def call_groq_fallback_b(prompt: str, response_format_json: bool = True) -> str:
+    """Group B fallback (Comparison, ATS, Resume OCR) — uses GROQ_API_KEY_2 + multi-model."""
+    groq_key = os.getenv("GROQ_API_KEY_2")
+    if not groq_key:
+        print("[Groq-B] GROQ_API_KEY_2 not set — using GROQ_API_KEY.")
+        return call_groq_fallback(prompt, response_format_json)
+    return _call_groq_with_models(groq_key, prompt, response_format_json)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -113,6 +155,13 @@ def get_gemini_analysis(answers: Dict[str, Any], api_key: str) -> Dict[str, Any]
     interests_str = ", ".join(interests) if interests else "None"
     values_str = " -> ".join(values_ranking)
     anti_goals_str = ", ".join(anti_goals) if anti_goals else "None"
+    country = location.get("country", "")
+    city = location.get("city", "")
+    loc_str = f"{city}, {country}".strip(", ")
+
+    # Fetch real market data for preferred career and inject into prompt
+    # This grounds ALL AI responses (Gemini + Groq fallbacks) in real data
+    market_ctx = get_market_context_for_prompt(preferred_career, loc_str) if preferred_career and preferred_career != "not_sure" else ""
 
     prompt = f"""You are a Career Counselor and Psychologist. Analyze the candidate's career profiling answers:
 Academic Profile:
@@ -130,6 +179,8 @@ Core Work Values (Ranked from highest to lowest priority):
 
 Primary Driver Priority: {priority}
 Anti-Goals (Filter OUT paths matching these constraints): {anti_goals_str}
+
+{market_ctx}
 
 Your task is to recommend 3 ranked career path matches.
 For each path, you MUST compute:
@@ -211,15 +262,24 @@ Create a realistic career compatibility report. Return ONLY a raw JSON object (n
 }}"""
 
     if not api_key:
-        print("[Gemini Analyze] API key missing, trying Groq fallback...")
+        print("[Gemini 1 Analyze] Key missing — trying Groq 1...")
         try:
-            groq_content = call_groq_fallback(prompt, response_format_json=True)
-            return json.loads(groq_content)
-        except Exception as groq_err:
-            raise HTTPException(
-                status_code=500,
-                detail=f"GEMINI_API_KEY is not configured and Groq fallback failed: {str(groq_err)}"
-            )
+            return json.loads(call_groq_fallback(prompt, response_format_json=True))
+        except Exception:
+            pass
+        api_key_2 = os.getenv("GEMINI_API_KEY_2")
+        if api_key_2:
+            try:
+                url2 = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key_2}"
+                res2 = requests.post(url2, headers={"Content-Type": "application/json"}, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}}, timeout=30)
+                if res2.status_code == 200:
+                    return json.loads(res2.json()["candidates"][0]["content"]["parts"][0]["text"])
+            except Exception:
+                pass
+        try:
+            return json.loads(call_groq_fallback_b(prompt, response_format_json=True))
+        except Exception as final_err:
+            raise HTTPException(status_code=500, detail=f"All 4 keys exhausted for career analysis: {str(final_err)}")
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
@@ -235,16 +295,27 @@ Create a realistic career compatibility report. Return ONLY a raw JSON object (n
         text_content = data["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(text_content)
     except Exception as e:
-        print(f"[Gemini Analyze] Call failed: {e}. Falling back to Groq Llama model...")
+        print(f"[Gemini 1 Analyze] Failed: {e}. Trying Groq 1...")
         try:
-            groq_content = call_groq_fallback(prompt, response_format_json=True)
-            return json.loads(groq_content)
+            return json.loads(call_groq_fallback(prompt, response_format_json=True))
         except Exception as groq_err:
-            print(f"[Groq Analyze Fallback] Failed: {groq_err}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Both Gemini and Groq fallback failed. Gemini Error: {str(e)}. Groq Error: {str(groq_err)}"
-            )
+            print(f"[Groq 1 Analyze] Failed: {groq_err}. Trying Gemini 2...")
+            api_key_2 = os.getenv("GEMINI_API_KEY_2")
+            if api_key_2:
+                try:
+                    url2 = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key_2}"
+                    res2 = requests.post(url2, headers={"Content-Type": "application/json"}, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}}, timeout=30)
+                    if res2.status_code == 200:
+                        return json.loads(res2.json()["candidates"][0]["content"]["parts"][0]["text"])
+                except Exception as gem2_err:
+                    print(f"[Gemini 2 Analyze] Failed: {gem2_err}. Trying Groq 2 (last resort)...")
+            try:
+                return json.loads(call_groq_fallback_b(prompt, response_format_json=True))
+            except Exception as final_err:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"All 4 API keys exhausted for career analysis. Last error: {str(final_err)}"
+                )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -587,13 +658,24 @@ def generate_mock_comparison(career_a: str, career_b: str) -> Dict[str, Any]:
 
 
 def get_gemini_comparison(career_a: str, career_b: str, api_key: str) -> Dict[str, Any]:
-    if not api_key:
-        print("[Gemini Comparison] API key missing, falling back to dynamic simulated comparison.")
-        return generate_mock_comparison(career_a, career_b)
+    """Group B — uses GEMINI_API_KEY_2 / GROQ_API_KEY_2."""
 
-    prompt = f"""Compare the following two career paths in detail:
-1. Career A: {career_a}
-2. Career B: {career_b}
+    # Fetch real market data for BOTH careers — injected into prompt
+    # Ensures Gemini AND Groq fallbacks both work from real data, not guesses
+    market_ctx_a = get_market_context_for_prompt(career_a)
+    market_ctx_b = get_market_context_for_prompt(career_b)
+
+    prompt = f"""Compare the following two career paths. Base your response STRICTLY on the real market data provided below — do NOT guess or hallucinate salary ranges, company names, or skill demands.
+
+Career A: {career_a}
+Career B: {career_b}
+
+--- Real Market Data for Career A ---
+{market_ctx_a}
+
+--- Real Market Data for Career B ---
+{market_ctx_b}
+---
 
 Generate a comprehensive comparison report covering salaries, job demand, core skills, government relevance, operational factors, and a personal recommendation verdict.
 
@@ -640,11 +722,11 @@ Return ONLY a raw JSON object (no markdown, no code fences) with this exact sche
 }}"""
 
     if not api_key:
-        print("[Gemini Comparison] API key missing, trying Groq...")
+        print("[Gemini-B Comparison] Key missing — trying Groq B...")
         try:
-            return json.loads(call_groq_fallback(prompt, response_format_json=True))
+            return json.loads(call_groq_fallback_b(prompt, response_format_json=True))
         except Exception as groq_err:
-            print(f"[Groq Comparison Fallback] Failed: {groq_err}. Falling back to dynamic mock comparison.")
+            print(f"[Groq-B Comparison] Failed: {groq_err}. Using mock.")
             return generate_mock_comparison(career_a, career_b)
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
@@ -661,18 +743,17 @@ Return ONLY a raw JSON object (no markdown, no code fences) with this exact sche
         text_content = data["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(text_content)
     except Exception as e:
-        print(f"[Gemini Comparison] Failed: {e}. Falling back to Groq...")
+        print(f"[Gemini-B Comparison] Failed: {e}. Trying Groq B...")
         try:
-            groq_content = call_groq_fallback(prompt, response_format_json=True)
-            return json.loads(groq_content)
+            return json.loads(call_groq_fallback_b(prompt, response_format_json=True))
         except Exception as groq_err:
-            print(f"[Groq Comparison Fallback] Failed: {groq_err}. Falling back to dynamic mock comparison.")
+            print(f"[Groq-B Comparison] Failed: {groq_err}. Using mock.")
             return generate_mock_comparison(career_a, career_b)
 
 
 @app.post("/api/compare")
 async def compare_careers(request: CompareRequest):
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    gemini_key = os.getenv("GEMINI_API_KEY_2")  # Group B key
     return get_gemini_comparison(request.career_a, request.career_b, gemini_key)
 
 
@@ -869,6 +950,69 @@ def fetch_jobs_for_skill_gap(query: str, location: str) -> List[Dict[str, Any]]:
             print(f"[Adzuna Skill Gap] Exception during fetch: {e}")
 
     return jobs_list
+
+
+def get_market_context_for_prompt(career: str, location: str = "") -> str:
+    """
+    Fetches real job postings for a career and returns a formatted market context
+    string to inject into ALL AI prompts (Gemini + Groq).
+    
+    This ensures every AI call — regardless of which key handles it — receives
+    the same real-time labour market data, preventing hallucinated/mock answers.
+    """
+    cache_key = f"mkt_ctx::{career.lower()}::{location.lower()}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
+
+    jobs = fetch_jobs_for_skill_gap(career, location)
+    if not jobs:
+        ctx = f"[No live job data found for '{career}' in '{location or 'Global'}'. Use general knowledge.]"
+        _cache_set(cache_key, ctx)
+        return ctx
+
+    total = len(jobs)
+
+    # Extract skills frequency
+    skill_counts: dict = {}
+    company_counts: dict = {}
+    remote_count = 0
+    for job in jobs:
+        desc = job.get("description", "")
+        for skill in extract_skills_from_text(desc):
+            skill_counts[skill] = skill_counts.get(skill, 0) + 1
+        company = job.get("company", "")
+        if company:
+            company_counts[company] = company_counts.get(company, 0) + 1
+        if any(w in desc.lower() for w in ["remote", "work from home", "wfh"]):
+            remote_count += 1
+
+    top_skills = sorted(skill_counts.items(), key=lambda x: x[1], reverse=True)[:12]
+    top_companies = sorted(company_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+    remote_pct = round((remote_count / total) * 100) if total else 0
+
+    skills_str = ", ".join(
+        [f"{s} ({round(c/total*100)}% of postings)" for s, c in top_skills]
+    )
+    companies_str = ", ".join([c for c, _ in top_companies]) if top_companies else "Not available"
+
+    ctx = f"""
+=== REAL-TIME LABOUR MARKET DATA ({total} live job postings analysed) ===
+Career Target: {career}
+Location: {location or 'Global'}
+Total Live Postings Analysed: {total}
+Remote Opportunities: {remote_pct}% of postings mention remote/WFH
+
+Top In-Demand Skills (by frequency in real job descriptions):
+{skills_str}
+
+Top Hiring Companies (from live postings):
+{companies_str}
+=== END MARKET DATA — Base ALL recommendations on the above real data ===
+""".strip()
+
+    _cache_set(cache_key, ctx)
+    return ctx
 
 
 def get_gemini_skill_gap_insights(
@@ -1560,14 +1704,35 @@ Return ONLY a raw JSON object (no markdown formatting, no code fences) matching 
 }}"""
 
     if not api_key:
-        print("[Gemini Roadmap] API key missing, trying Groq fallback...")
+        print("[Roadmap] Dedicated key missing — trying Groq 1...")
         try:
             return json.loads(call_groq_fallback(prompt, response_format_json=True))
-        except Exception as groq_err:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Gemini API Key missing and Groq fallback failed: {str(groq_err)}"
-            )
+        except Exception:
+            pass
+        print("[Roadmap] Groq 1 failed — trying Gemini Key 1...")
+        api_key_1 = os.getenv("GEMINI_API_KEY")
+        if api_key_1:
+            try:
+                r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key_1}", headers={"Content-Type": "application/json"}, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}}, timeout=30)
+                if r.status_code == 200:
+                    return json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+            except Exception:
+                pass
+        print("[Roadmap] Gemini 1 failed — trying Groq 2...")
+        try:
+            return json.loads(call_groq_fallback_b(prompt, response_format_json=True))
+        except Exception:
+            pass
+        print("[Roadmap] Groq 2 failed — trying Gemini Key 2 (last resort)...")
+        api_key_2 = os.getenv("GEMINI_API_KEY_2")
+        if api_key_2:
+            try:
+                r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key_2}", headers={"Content-Type": "application/json"}, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}}, timeout=30)
+                if r.status_code == 200:
+                    return json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+            except Exception as final_err:
+                raise HTTPException(status_code=500, detail=f"All 5 API keys exhausted for roadmap. Last error: {str(final_err)}")
+        raise HTTPException(status_code=500, detail="All API keys exhausted for roadmap generation.")
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
@@ -1583,20 +1748,38 @@ Return ONLY a raw JSON object (no markdown formatting, no code fences) matching 
         text_content = data["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(text_content)
     except Exception as e:
-        print(f"[Gemini Roadmap] Failed: {e}. Trying Groq fallback...")
+        print(f"[Roadmap Key] Failed: {e}. Trying Groq 1...")
         try:
-            groq_content = call_groq_fallback(prompt, response_format_json=True)
-            return json.loads(groq_content)
-        except Exception as groq_err:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Both Gemini and Groq roadmap generation failed. Gemini: {str(e)}. Groq: {str(groq_err)}"
-            )
+            return json.loads(call_groq_fallback(prompt, response_format_json=True))
+        except Exception as groq1_err:
+            print(f"[Groq 1 Roadmap] Failed: {groq1_err}. Trying Gemini Key 1...")
+            api_key_1 = os.getenv("GEMINI_API_KEY")
+            if api_key_1:
+                try:
+                    r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key_1}", headers={"Content-Type": "application/json"}, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}}, timeout=30)
+                    if r.status_code == 200:
+                        return json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+                except Exception as gem1_err:
+                    print(f"[Gemini 1 Roadmap] Failed: {gem1_err}. Trying Groq 2...")
+            try:
+                return json.loads(call_groq_fallback_b(prompt, response_format_json=True))
+            except Exception as groq2_err:
+                print(f"[Groq 2 Roadmap] Failed: {groq2_err}. Trying Gemini Key 2 (last resort)...")
+                api_key_2 = os.getenv("GEMINI_API_KEY_2")
+                if api_key_2:
+                    try:
+                        r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key_2}", headers={"Content-Type": "application/json"}, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}}, timeout=30)
+                        if r.status_code == 200:
+                            return json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+                    except Exception as gem2_err:
+                        raise HTTPException(status_code=500, detail=f"All 5 keys exhausted for roadmap. Last error: {str(gem2_err)}")
+                raise HTTPException(status_code=500, detail="All API keys exhausted for roadmap generation.")
 
 @app.post("/api/roadmap")
 @app.get("/api/roadmap")
 async def generate_roadmap_endpoint_get(career_path: str, location: str = "", student_skills: str = "", cgpa: float = 8.0):
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    # Dedicated roadmap key is tried FIRST; same user input flows to all keys on failure
+    gemini_key = os.getenv("GEMINI_API_KEY_ROADMAP") or os.getenv("GEMINI_API_KEY")
     student_skills_normalized = [s.strip().lower() for s in student_skills.split(",") if s.strip()]
     skills_list = [s.strip() for s in student_skills.split(",") if s.strip()]
 
@@ -1679,7 +1862,8 @@ async def generate_roadmap_endpoint_get(career_path: str, location: str = "", st
 
 @app.post("/api/roadmap")
 async def generate_roadmap_endpoint(request: RoadmapRequest):
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    # Dedicated roadmap key is tried FIRST; same user input flows to all keys on failure
+    gemini_key = os.getenv("GEMINI_API_KEY_ROADMAP") or os.getenv("GEMINI_API_KEY")
     career = request.career_path
     location = request.location
     student_skills = request.student_skills
@@ -1796,47 +1980,38 @@ def get_real_market_data(career_path: str, location: str) -> Dict[str, Any]:
 
     raw_jobs: List[Dict] = []
 
-    # ── 1. JSearch /estimated-salary for real Entry/Mid/Senior salary data ──
-    jsearch_salary: Dict[str, Any] = {}
+    # ── 1. Try JSearch (RapidAPI) ─────────────────────────────────────────
     if jsearch_key:
         try:
-            sal_headers = {
+            headers = {
                 "x-rapidapi-key": jsearch_key,
-                "x-rapidapi-host": "jsearch.p.rapidapi.com",
-                "Content-Type": "application/json"
+                "x-rapidapi-host": "jsearch.p.rapidapi.com"
             }
-            loc_param = location or "United States"
-            exp_map = {
-                "entry":  "ENTRY_LEVEL",
-                "mid":    "MID_LEVEL",
-                "senior": "SENIOR_LEVEL",
-            }
-            for tier, exp_val in exp_map.items():
-                params = {
-                    "job_title": career_path,
-                    "location": loc_param,
-                    "location_type": "ANY",
-                    "years_of_experience": exp_val,
-                }
-                res = requests.get(
-                    "https://jsearch.p.rapidapi.com/estimated-salary",
-                    headers=sal_headers, params=params, timeout=15
-                )
-                if res.status_code == 200:
-                    data = res.json().get("data", [])
-                    if data:
-                        d = data[0]
-                        lo = int((d.get("min_salary") or 0) / 1000)
-                        hi = int((d.get("max_salary") or 0) / 1000)
-                        med = int((d.get("median_salary") or 0) / 1000)
-                        if lo > 0 and hi > 0:
-                            jsearch_salary[tier] = f"${lo}k – ${hi}k (median ${med}k)"
-                            print(f"[Market JSearch Salary] {tier}: ${lo}k–${hi}k")
-                else:
-                    print(f"[Market JSearch Salary] {tier} returned {res.status_code}")
+            query = f"{career_path} {location}".strip() if location else career_path
+            for page in range(1, 4):
+                params = {"query": query, "page": str(page), "num_pages": "1", "date_posted": "month"}
+                res = requests.get("https://jsearch.p.rapidapi.com/search", headers=headers, params=params, timeout=12)
+                if res.status_code != 200:
+                    print(f"[Market JSearch] Page {page} status {res.status_code}")
+                    break
+                data = res.json().get("data", [])
+                if not data:
+                    break
+                for j in data:
+                    raw_jobs.append({
+                        "title": j.get("job_title", ""),
+                        "company": j.get("employer_name", ""),
+                        "location": f"{j.get('job_city', '')} {j.get('job_country', '')}".strip(),
+                        "type": j.get("job_employment_type", ""),
+                        "remote": bool(j.get("job_is_remote")),
+                        "salary": "",
+                        "salary_min": j.get("job_min_salary"),
+                        "salary_max": j.get("job_max_salary"),
+                        "description": (j.get("job_description") or "")[:800],
+                        "source": "JSearch",
+                    })
         except Exception as e:
-            print(f"[Market JSearch Salary] Error: {e}")
-
+            print(f"[Market JSearch] Error: {e}")
 
     # ── 2. Always try Jooble (reliable free tier) ─────────────────────────
     if jooble_key:
@@ -1907,38 +2082,23 @@ def get_real_market_data(career_path: str, location: str) -> Dict[str, Any]:
         lo, hi = int(idx), min(int(idx) + 1, len(data) - 1)
         return data[lo] + (data[hi] - data[lo]) * (idx - lo)
 
-    # Priority 1: JSearch /estimated-salary (real data per experience tier)
-    if jsearch_salary:
+    salary_data_available = len(all_salaries) >= 5
+    if salary_data_available:
+        p25 = _percentile(all_salaries, 25)
+        p50 = _percentile(all_salaries, 50)
+        p75 = _percentile(all_salaries, 75)
+        p90 = _percentile(all_salaries, 90)
+        entry_lo, entry_hi = int(p25 / 1000), int((p25 * 1.18) / 1000)
+        mid_lo,   mid_hi   = int(p50 / 1000), int((p75) / 1000)
+        senior_lo, senior_hi = int(p75 / 1000), int((p90 * 1.05) / 1000)
         salary_ranges = {
-            "entry":  jsearch_salary.get("entry", "N/A"),
-            "mid":    jsearch_salary.get("mid", "N/A"),
-            "senior": jsearch_salary.get("senior", "N/A"),
-            "low_confidence": len(jsearch_salary) < 3,
-            "source": "JSearch Estimated Salary"
+            "entry":  f"${entry_lo}k – ${entry_hi}k",
+            "mid":    f"${mid_lo}k – ${mid_hi}k",
+            "senior": f"${senior_lo}k – ${senior_hi}k",
+            "low_confidence": len(all_salaries) < 15
         }
     else:
-        # Priority 2: Derive from Jooble salary strings via percentiles
-        for j in raw_jobs:
-            parsed = _parse_salary_string(j.get("salary", ""))
-            all_salaries.extend(parsed)
-
-        if len(all_salaries) >= 5:
-            p25 = _percentile(all_salaries, 25)
-            p50 = _percentile(all_salaries, 50)
-            p75 = _percentile(all_salaries, 75)
-            p90 = _percentile(all_salaries, 90)
-            entry_lo, entry_hi = int(p25 / 1000), int((p25 * 1.18) / 1000)
-            mid_lo,   mid_hi   = int(p50 / 1000), int(p75 / 1000)
-            senior_lo, senior_hi = int(p75 / 1000), int((p90 * 1.05) / 1000)
-            salary_ranges = {
-                "entry":  f"${entry_lo}k – ${entry_hi}k",
-                "mid":    f"${mid_lo}k – ${mid_hi}k",
-                "senior": f"${senior_lo}k – ${senior_hi}k",
-                "low_confidence": len(all_salaries) < 15,
-                "source": "Jooble Listings"
-            }
-        else:
-            salary_ranges = {"entry": "N/A", "mid": "N/A", "senior": "N/A", "low_confidence": True, "source": "Insufficient data"}
+        salary_ranges = {"entry": "N/A", "mid": "N/A", "senior": "N/A", "low_confidence": True}
 
     # ── 4. Top hiring companies ──────────────────────────────────────────
     company_counts: Dict[str, int] = {}
@@ -2075,8 +2235,7 @@ async def market_data_endpoint_get(career_path: str, location: str = ""):
 
 @app.post("/api/market-data")
 async def market_data_endpoint(request: MarketDataRequest):
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    return get_market_data(request.career_path, request.location, gemini_key)
+    return get_real_market_data(request.career_path, request.location)
 
 
 # ---------------------------------------------------------------
@@ -2336,7 +2495,7 @@ def parse_resume_text(file_bytes: bytes, filename: str) -> str:
             return "\n".join(para.text for para in doc.paragraphs if para.text.strip())
 
         elif fname.endswith((".png", ".jpg", ".jpeg")):
-            gemini_key = os.getenv("GEMINI_API_KEY")
+            gemini_key = os.getenv("GEMINI_API_KEY_2")  # Group B key
             return parse_resume_image_gemini(file_bytes, filename, gemini_key)
 
         else:
@@ -2870,9 +3029,9 @@ Return ONLY a valid JSON object with these exact keys:
     except Exception as e:
         print(f"[ATS Gemini] Error: {e}")
 
-    # Groq fallback
+    # Groq-B fallback (Group B key)
     try:
-        return json.loads(call_groq_fallback(prompt, response_format_json=True))
+        return json.loads(call_groq_fallback_b(prompt, response_format_json=True))
     except Exception as e:
         print(f"[ATS Groq] Error: {e}")
         return {
@@ -2943,7 +3102,7 @@ async def ats_analyze(
     ats_result = calculate_ats_score(entities, market, career_path)
 
     # ── Step 5: AI summary (Gemini/Groq — explanations only) ─────────────
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    gemini_key = os.getenv("GEMINI_API_KEY_2")  # Group B key
     ai_summary = get_ai_ats_summary(entities, ats_result, market, career_path, gemini_key)
 
     # ── Step 6: Store in Supabase (best-effort, don't fail if down) ───────
