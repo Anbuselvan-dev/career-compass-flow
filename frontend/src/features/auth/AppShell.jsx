@@ -97,7 +97,7 @@ export function AppShell() {
           </div>
 
           {/* The full career app */}
-          <CareerFlow user={user} />
+          <CareerFlow key={user.id} user={user} />
         </motion.div>
       )}
     </AnimatePresence>
