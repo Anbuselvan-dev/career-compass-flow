@@ -15,14 +15,22 @@ export function CareerFlow({ user }) {
   const [validationErrors, setValidationErrors] = useState({});
   const [customSkillInput, setCustomSkillInput] = useState("");
   const [customInterestInput, setCustomInterestInput] = useState("");
+  const [restoring, setRestoring] = useState(true);
 
   // Restore previous session if career report exists in Supabase
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      setRestoring(false);
+      return;
+    }
     const username = user.fullname || user.email;
-    if (!username) return;
+    if (!username) {
+      setRestoring(false);
+      return;
+    }
 
     const restoreSession = async () => {
+      setRestoring(true);
       try {
         const url = `${import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"}/api/auth/latest-report?username=${encodeURIComponent(username)}`;
         const res = await fetch(url);
@@ -47,6 +55,8 @@ export function CareerFlow({ user }) {
         }
       } catch (e) {
         console.error("Error restoring session:", e);
+      } finally {
+        setRestoring(false);
       }
     };
 
@@ -306,6 +316,23 @@ export function CareerFlow({ user }) {
       }
     }
   };
+
+  if (restoring) {
+    return (
+      <main className="flex min-h-screen items-center justify-center px-4 py-14 bg-background">
+        <div className="w-full max-w-md space-y-6 rounded-3xl border border-border/60 bg-card/70 p-8 text-center shadow-card backdrop-blur-sm">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-gradient-primary text-primary-foreground shadow-soft animate-spin">
+            <RefreshCw className="h-7 w-7" />
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-xl font-bold tracking-tight text-foreground animate-pulse">
+              Restoring session...
+            </h2>
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   if (loading) {
     return (
