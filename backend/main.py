@@ -2057,11 +2057,55 @@ EDUCATION_CAREER_MAP = {
 }
 
 
+def parse_resume_image_gemini(file_bytes: bytes, filename: str, api_key: str) -> str:
+    """Use Gemini multimodal vision API to transcribe resume text from an image."""
+    if not api_key:
+        print("[Image OCR] GEMINI_API_KEY is not configured.")
+        return ""
+    try:
+        import base64
+        # Detect mime type
+        mime = "image/png"
+        if filename.lower().endswith((".jpg", ".jpeg")):
+            mime = "image/jpeg"
+            
+        b64_data = base64.b64encode(file_bytes).decode("utf-8")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "inlineData": {
+                                "mimeType": mime,
+                                "data": b64_data
+                            }
+                        },
+                        {
+                            "text": "Please extract all text exactly from this resume image. Output only the extracted plain text. Do not add markdown blocks."
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1
+            }
+        }
+        headers = {"Content-Type": "application/json"}
+        res = requests.post(url, json=payload, headers=headers, timeout=30)
+        res.raise_for_status()
+        text = res.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        return text.strip()
+    except Exception as e:
+        print(f"[Image OCR] OCR extraction failed: {e}")
+        return ""
+
+
 # -----------------------------------------------------------------------
 # STEP 1 — Parse resume file bytes → raw text
 # -----------------------------------------------------------------------
 def parse_resume_text(file_bytes: bytes, filename: str) -> str:
-    """Extract plain text from PDF or DOCX resume bytes."""
+    """Extract plain text from PDF, DOCX, or Image resume bytes."""
     fname = filename.lower()
     try:
         if fname.endswith(".pdf"):
@@ -2078,6 +2122,10 @@ def parse_resume_text(file_bytes: bytes, filename: str) -> str:
             from docx import Document
             doc = Document(io.BytesIO(file_bytes))
             return "\n".join(para.text for para in doc.paragraphs if para.text.strip())
+
+        elif fname.endswith((".png", ".jpg", ".jpeg")):
+            gemini_key = os.getenv("GEMINI_API_KEY")
+            return parse_resume_image_gemini(file_bytes, filename, gemini_key)
 
         else:
             # Fallback: treat as plain text
@@ -2646,8 +2694,8 @@ async def ats_analyze(
     """
     # ── Validate file ────────────────────────────────────────────────────
     fname = (file.filename or "").lower()
-    if not (fname.endswith(".pdf") or fname.endswith(".docx")):
-        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are accepted.")
+    if not (fname.endswith(".pdf") or fname.endswith(".docx") or fname.endswith((".png", ".jpg", ".jpeg"))):
+        raise HTTPException(status_code=400, detail="Only PDF, DOCX, and image (PNG, JPG, JPEG) files are accepted.")
 
     file_bytes = await file.read()
     if len(file_bytes) > 6 * 1024 * 1024:
@@ -2658,7 +2706,7 @@ async def ats_analyze(
     # ── Step 1: Parse resume ──────────────────────────────────────────────
     resume_text = parse_resume_text(file_bytes, file.filename)
     if len(resume_text.strip()) < 50:
-        raise HTTPException(status_code=422, detail="Could not extract text from the uploaded resume. Ensure the PDF is not scanned/image-only.")
+        raise HTTPException(status_code=422, detail="Could not extract text from the uploaded resume. Ensure the file is not corrupted or unreadable.")
 
     entities = extract_resume_entities(resume_text)
     print(f"[ATS] Extracted {len(entities['skills'])} skills, {len(entities['projects'])} projects, {len(entities['certifications'])} certs")
@@ -2691,9 +2739,17 @@ async def ats_analyze(
         unique_id = str(_uuid.uuid4())
         safe_name = file.filename.replace(" ", "_").replace("..", "")
         storage_path = f"{unique_id}/{safe_name}"
-        supabase_storage_upload("resumes", storage_path, file_bytes,
-                                "application/pdf" if fname.endswith(".pdf") else
-                                "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        content_type = "application/octet-stream"
+        if fname.endswith(".pdf"):
+            content_type = "application/pdf"
+        elif fname.endswith(".docx"):
+            content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif fname.endswith(".png"):
+            content_type = "image/png"
+        elif fname.endswith((".jpg", ".jpeg")):
+            content_type = "image/jpeg"
+
+        supabase_storage_upload("resumes", storage_path, file_bytes, content_type)
         signed_url = supabase_get_signed_url("resumes", storage_path, expires_in=86400)
         row_id = str(_uuid.uuid4())
         supabase_insert("resumes", {
