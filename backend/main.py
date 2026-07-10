@@ -1763,7 +1763,247 @@ async def generate_roadmap_endpoint(request: RoadmapRequest):
     return roadmap_data
 
 
-def get_mock_market_data(career_path: str, location: str) -> Dict[str, Any]:
+def _parse_salary_string(s: str) -> List[float]:
+    """Extract numeric salary values from strings like '$80k - $120k' or '$50 per hour'."""
+    if not s:
+        return []
+    s = s.replace(",", "").lower()
+    nums = re.findall(r"\$?([\d.]+)k?", s)
+    results = []
+    for n in nums:
+        val = float(n)
+        if val < 500:          # treat as thousands (e.g. "80k")
+            val *= 1000
+        if val < 5000:         # hourly rate — annualise (×2080 work hours)
+            val *= 2080
+        if 10000 <= val <= 1_000_000:
+            results.append(val)
+    return results
+
+
+def get_real_market_data(career_path: str, location: str) -> Dict[str, Any]:
+    """
+    Fetch real labour market data from Jooble + JSearch.
+    Derives salary stats, top companies, job types, skill demand from actual postings.
+    Returns insufficient_data=True if fewer than 10 postings found.
+    """
+    import html as _html
+    from datetime import datetime as _dt
+
+    jsearch_key = os.getenv("JSearch_api_key")
+    jooble_key  = os.getenv("Jooble_api_key")
+    MIN_POSTINGS = 10
+
+    raw_jobs: List[Dict] = []
+
+    # ── 1. JSearch /estimated-salary for real Entry/Mid/Senior salary data ──
+    jsearch_salary: Dict[str, Any] = {}
+    if jsearch_key:
+        try:
+            sal_headers = {
+                "x-rapidapi-key": jsearch_key,
+                "x-rapidapi-host": "jsearch.p.rapidapi.com",
+                "Content-Type": "application/json"
+            }
+            loc_param = location or "United States"
+            exp_map = {
+                "entry":  "ENTRY_LEVEL",
+                "mid":    "MID_LEVEL",
+                "senior": "SENIOR_LEVEL",
+            }
+            for tier, exp_val in exp_map.items():
+                params = {
+                    "job_title": career_path,
+                    "location": loc_param,
+                    "location_type": "ANY",
+                    "years_of_experience": exp_val,
+                }
+                res = requests.get(
+                    "https://jsearch.p.rapidapi.com/estimated-salary",
+                    headers=sal_headers, params=params, timeout=15
+                )
+                if res.status_code == 200:
+                    data = res.json().get("data", [])
+                    if data:
+                        d = data[0]
+                        lo = int((d.get("min_salary") or 0) / 1000)
+                        hi = int((d.get("max_salary") or 0) / 1000)
+                        med = int((d.get("median_salary") or 0) / 1000)
+                        if lo > 0 and hi > 0:
+                            jsearch_salary[tier] = f"${lo}k – ${hi}k (median ${med}k)"
+                            print(f"[Market JSearch Salary] {tier}: ${lo}k–${hi}k")
+                else:
+                    print(f"[Market JSearch Salary] {tier} returned {res.status_code}")
+        except Exception as e:
+            print(f"[Market JSearch Salary] Error: {e}")
+
+
+    # ── 2. Always try Jooble (reliable free tier) ─────────────────────────
+    if jooble_key:
+        try:
+            url = f"https://jooble.org/api/{jooble_key}"
+            for pg in ["1", "2"]:
+                payload = {
+                    "keywords": career_path,
+                    "location": location or "",
+                    "page": pg
+                }
+                res = requests.post(url, json=payload, timeout=12)
+                if res.status_code != 200:
+                    break
+                for j in res.json().get("jobs", []):
+                    raw_jobs.append({
+                        "title": j.get("title", ""),
+                        "company": j.get("company", ""),
+                        "location": j.get("location", ""),
+                        "type": j.get("type", "Full-time"),
+                        "remote": "remote" in (j.get("location") or "").lower(),
+                        "salary": j.get("salary", ""),
+                        "salary_min": None,
+                        "salary_max": None,
+                        "description": _html.unescape(re.sub(r"<[^>]*>", " ", j.get("snippet", ""))),
+                        "source": "Jooble",
+                    })
+        except Exception as e:
+            print(f"[Market Jooble] Error: {e}")
+
+    total = len(raw_jobs)
+    print(f"[Market Data] Fetched {total} postings for '{career_path}' / '{location}'")
+
+    if total < MIN_POSTINGS:
+        return {
+            "career": career_path,
+            "insufficient_data": True,
+            "total_postings": total,
+            "data_source": [],
+            "last_updated": _dt.utcnow().isoformat() + "Z",
+            "message": f"Only {total} postings found — too few for reliable stats. Try a broader career title or location."
+        }
+
+    sources_used = list(set(j["source"] for j in raw_jobs))
+
+    # ── 3. Salary stats from real postings ───────────────────────────────
+    all_salaries: List[float] = []
+    for j in raw_jobs:
+        # JSearch structured fields
+        if j.get("salary_min") and j.get("salary_max"):
+            smin = float(j["salary_min"])
+            smax = float(j["salary_max"])
+            # annualise if looks like hourly
+            if smax < 500:
+                smin *= 2080; smax *= 2080
+            if smin >= 10000:
+                all_salaries += [smin, smax]
+        else:
+            # Jooble string field
+            parsed = _parse_salary_string(j.get("salary", ""))
+            all_salaries.extend(parsed)
+
+    def _percentile(data: List[float], pct: float) -> float:
+        if not data:
+            return 0.0
+        data = sorted(data)
+        idx = (pct / 100) * (len(data) - 1)
+        lo, hi = int(idx), min(int(idx) + 1, len(data) - 1)
+        return data[lo] + (data[hi] - data[lo]) * (idx - lo)
+
+    # Priority 1: JSearch /estimated-salary (real data per experience tier)
+    if jsearch_salary:
+        salary_ranges = {
+            "entry":  jsearch_salary.get("entry", "N/A"),
+            "mid":    jsearch_salary.get("mid", "N/A"),
+            "senior": jsearch_salary.get("senior", "N/A"),
+            "low_confidence": len(jsearch_salary) < 3,
+            "source": "JSearch Estimated Salary"
+        }
+    else:
+        # Priority 2: Derive from Jooble salary strings via percentiles
+        for j in raw_jobs:
+            parsed = _parse_salary_string(j.get("salary", ""))
+            all_salaries.extend(parsed)
+
+        if len(all_salaries) >= 5:
+            p25 = _percentile(all_salaries, 25)
+            p50 = _percentile(all_salaries, 50)
+            p75 = _percentile(all_salaries, 75)
+            p90 = _percentile(all_salaries, 90)
+            entry_lo, entry_hi = int(p25 / 1000), int((p25 * 1.18) / 1000)
+            mid_lo,   mid_hi   = int(p50 / 1000), int(p75 / 1000)
+            senior_lo, senior_hi = int(p75 / 1000), int((p90 * 1.05) / 1000)
+            salary_ranges = {
+                "entry":  f"${entry_lo}k – ${entry_hi}k",
+                "mid":    f"${mid_lo}k – ${mid_hi}k",
+                "senior": f"${senior_lo}k – ${senior_hi}k",
+                "low_confidence": len(all_salaries) < 15,
+                "source": "Jooble Listings"
+            }
+        else:
+            salary_ranges = {"entry": "N/A", "mid": "N/A", "senior": "N/A", "low_confidence": True, "source": "Insufficient data"}
+
+    # ── 4. Top hiring companies ──────────────────────────────────────────
+    company_counts: Dict[str, int] = {}
+    for j in raw_jobs:
+        c = (j.get("company") or "").strip()
+        if c and c.lower() not in ("", "unknown"):
+            company_counts[c] = company_counts.get(c, 0) + 1
+    top_companies = [
+        {"company": k, "openings": v}
+        for k, v in sorted(company_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+    ]
+
+    # ── 5. Job type breakdown ────────────────────────────────────────────
+    type_counts: Dict[str, int] = {}
+    for j in raw_jobs:
+        jtype = (j.get("type") or "Full-time").strip() or "Full-time"
+        if j.get("remote"):
+            jtype = "Remote"
+        type_counts[jtype] = type_counts.get(jtype, 0) + 1
+    job_types = [{"type": k, "count": v} for k, v in sorted(type_counts.items(), key=lambda x: x[1], reverse=True)]
+
+    # ── 6. Location distribution (top 8) ────────────────────────────────
+    loc_counts: Dict[str, int] = {}
+    for j in raw_jobs:
+        loc = (j.get("location") or "").strip()
+        if loc and loc.lower() not in ("", "remote"):
+            # Use only country/city part
+            loc = loc.split(",")[-1].strip() if "," in loc else loc
+            if len(loc) > 2:
+                loc_counts[loc] = loc_counts.get(loc, 0) + 1
+    top_locations = [
+        {"location": k, "count": v}
+        for k, v in sorted(loc_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+    ]
+
+    # ── 7. In-demand skills from job descriptions ────────────────────────
+    skill_counts: Dict[str, int] = {}
+    for j in raw_jobs:
+        desc_lower = (j.get("description", "") + " " + j.get("title", "")).lower()
+        for token in TECH_VOCAB:
+            if re.search(r'\b' + re.escape(token) + r'\b', desc_lower):
+                norm = token.title()
+                skill_counts[norm] = skill_counts.get(norm, 0) + 1
+    demand_pct_skills = [
+        {"skill": k, "demand_pct": round((v / total) * 100)}
+        for k, v in sorted(skill_counts.items(), key=lambda x: x[1], reverse=True)[:12]
+        if round((v / total) * 100) >= 10
+    ]
+
+    return {
+        "career": career_path,
+        "insufficient_data": False,
+        "total_postings": total,
+        "data_source": sources_used,
+        "last_updated": _dt.utcnow().isoformat() + "Z",
+        "low_confidence": total < 30,
+        "salary_ranges": salary_ranges,
+        "top_companies": top_companies,
+        "job_types": job_types,
+        "top_locations": top_locations,
+        "in_demand_skills": demand_pct_skills,
+    }
+
+
+def get_market_data(career_path: str, location: str, api_key: str = None) -> Dict[str, Any]:
     """Generate deterministic, career-specific realistic mock data as fallback."""
     import hashlib
     # Create stable hash seed from input params
@@ -1820,65 +2060,10 @@ def get_mock_market_data(career_path: str, location: str) -> Dict[str, Any]:
     }
 
 
-def get_market_data(career_path: str, location: str, api_key: str) -> Dict[str, Any]:
-    prompt = f"""You are a Career Architect and Labour Market Analyst.
-Provide standardized, highly realistic, and field-specific labour market data for the career path of '{career_path}' in the region of '{location if location else "Global"}'.
+def get_market_data(career_path: str, location: str, api_key: str = None) -> Dict[str, Any]:
+    """Delegate to the real market data fetcher (JSearch + Jooble)."""
+    return get_real_market_data(career_path, location)
 
-Calculate entry, mid, and senior salary ranges reflecting actual market rates. 
-For the historical hiring demand trend index, assume 2022 has a base index of 100. Calculate indices for 2023, 2024, 2025, and 2026 that represent realistic growth rates for this specific career path (e.g. cutting-edge AI fields should grow steeply, QA or mature tech sectors should grow moderately, and sunset fields should be flat).
-Similarly, calculate realistic annual salaries in USD for the region comparison.
-
-Return ONLY a raw JSON object (no markdown, no code fences):
-{{
-  "career": "{career_path}",
-  "salary_ranges": {{
-    "entry": "CalculateEntryLevelSalaryRange (e.g. $70k - $85k)",
-    "mid": "CalculateMidLevelSalaryRange (e.g. $100k - $125k)",
-    "senior": "CalculateSeniorLevelSalaryRange (e.g. $145k - $180k)"
-  }},
-  "historical_trend": [
-    {{"year": "2022", "Index": 100}},
-    {{"year": "2023", "Index": 105}},
-    {{"year": "2024", "Index": 112}},
-    {{"year": "2025", "Index": 120}},
-    {{"year": "2026", "Index": 130}}
-  ],
-  "regional_comparison": [
-    {{"region": "Selected Region", "salary": 85000}},
-    {{"region": "National Average", "salary": 90000}},
-    {{"region": "Tech Hub Average", "salary": 115000}},
-    {{"region": "Global Average", "salary": 95000}}
-  ]
-}}"""
-
-    if not api_key:
-        print("[Gemini Market Data] API key missing, trying Groq...")
-        try:
-            return json.loads(call_groq_fallback(prompt, response_format_json=True))
-        except Exception as groq_err:
-            print(f"[Groq Market Data Fallback] Failed: {groq_err}. Using dynamic seeded mock.")
-            return get_mock_market_data(career_path, location)
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json"}
-    }
-
-    try:
-        res = requests.post(url, headers=headers, json=payload, timeout=20)
-        res.raise_for_status()
-        data = res.json()
-        text_content = data["candidates"][0]["content"]["parts"][0]["text"]
-        return json.loads(text_content)
-    except Exception as e:
-        print(f"[Gemini Market Data] Failed: {e}. Trying Groq...")
-        try:
-            return json.loads(call_groq_fallback(prompt, response_format_json=True))
-        except Exception as groq_err:
-            print(f"[Groq Market Data Fallback] Failed: {groq_err}. Using dynamic seeded mock.")
-            return get_mock_market_data(career_path, location)
 
 class MarketDataRequest(BaseModel):
     career_path: str
@@ -1886,8 +2071,7 @@ class MarketDataRequest(BaseModel):
 
 @app.get("/api/market-data")
 async def market_data_endpoint_get(career_path: str, location: str = ""):
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    return get_market_data(career_path, location, gemini_key)
+    return get_real_market_data(career_path, location)
 
 @app.post("/api/market-data")
 async def market_data_endpoint(request: MarketDataRequest):

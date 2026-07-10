@@ -1,0 +1,151 @@
+2881:         res = requests.get(url, headers=headers, params=params, timeout=10)
+2882:         res.raise_for_status()
+2883:         return res.json()
+2884:     except Exception as e:
+2885:         print(f"[Supabase Query] Error: {e}")
+2886:         return []
+2887: 
+2888: 
+2889: @app.post("/api/auth/signup")
+2890: def auth_signup(body: SignupRequest):
+2891:     """
+2892:     Register a new user with username, email, and password.
+2893:     """
+2894:     username = body.username.strip()
+2895:     email = body.email.strip().lower()
+2896:     password = body.password
+2897: 
+2898:     # Basic validation
+2899:     if not username:
+2900:         raise HTTPException(status_code=400, detail="Username is required.")
+2901:     if not email or "@" not in email:
+2902:         raise HTTPException(status_code=400, detail="A valid email is required.")
+2903:     if len(password) < 8:
+2904:         raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+2905: 
+2906:     # Check for existing username (stored as fullname)
+2907:     existing_username = supabase_query("users", {"fullname": username})
+2908:     if existing_username:
+2909:         raise HTTPException(status_code=409, detail="This username is already taken.")
+2910: 
+2911:     # Check for existing email
+2912:     existing_email = supabase_query("users", {"email": email})
+2913:     if existing_email:
+2914:         raise HTTPException(status_code=409, detail="An account with this email already exists.")
+2915: 
+2916:     # Hash password
+2917:     pw_hash = _bcrypt.hashpw(password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
+2918: 
+2919:     # Insert into Supabase (fullname stores username)
+2920:     user_id = str(_uuid.uuid4())
+2921:     supabase_insert("users", {
+2922:         "id": user_id,
+2923:         "fullname": username,
+2924:         "email": email,
+2925:         "password_hash": pw_hash,
+2926:         "is_active": True,
+2927:     })
+2928: 
+2929:     return {
+2930:         "success": True,
+2931:         "user": {
+2932:             "id": user_id,
+2933:             "fullname": username,
+2934:             "email": email,
+2935:         },
+2936:         "message": "Account created successfully.",
+2937:     }
+2938: 
+2939: 
+2940: @app.post("/api/auth/login")
+2941: def auth_login(body: LoginRequest):
+2942:     """
+2943:     Authenticate a user by email OR username.
+2944:     """
+2945:     login_id = body.login_id.strip()
+2946:     password = body.password
+2947: 
+2948:     # Try email first if it looks like an email
+2949:     rows = []
+2950:     if "@" in login_id:
+2951:         rows = supabase_query("users", {"email": login_id.lower()})
+2952:     
+2953:     # Try username (fullname) if no user found yet
+2954:     if not rows:
+2955:         rows = supabase_query("users", {"fullname": login_id})
+2956: 
+2957:     # Try matching email directly just in case login_id didn't have @ but is stored as email
+2958:     if not rows:
+2959:         rows = supabase_query("users", {"email": login_id.lower()})
+2960: 
+2961:     if not rows:
+2962:         raise HTTPException(status_code=401, detail="Invalid email/username or password.")
+2963: 
+2964:     user = rows[0]
+2965:     stored_hash = user.get("password_hash", "")
+2966: 
+2967:     # Verify password
+2968:     try:
+2969:         match = _bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8"))
+2970:     except Exception:
+2971:         match = False
+2972: 
+2973:     if not match:
+2974:         raise HTTPException(status_code=401, detail="Invalid email/username or password.")
+2975: 
+2976:     if not user.get("is_active", True):
+2977:         raise HTTPException(status_code=403, detail="Account is deactivated.")
+2978: 
+2979:     return {
+2980:         "success": True,
+2981:         "user": {
+2982:             "id": user["id"],
+2983:             "fullname": user["fullname"],
+2984:             "email": user["email"],
+2985:             "phone": user.get("phone"),
+2986:         },
+2987:         "message": "Login successful.",
+2988:     }
+2989: 
+2990: 
+2991: @app.post("/api/auth/google")
+2992: def auth_google(body: GoogleLoginRequest):
+2993:     """
+2994:     Authenticate a user via Google login. 
+2995:     If user doesn't exist, create an account.
+2996:     """
+2997:     email = body.email.strip().lower()
+2998:     fullname = body.fullname.strip()
+2999: 
+3000:     # Check if user already exists
+3001:     rows = supabase_query("users", {"email": email})
+3002:     if rows:
+3003:         user = rows[0]
+3004:         if not user.get("is_active", True):
+3005:             raise HTTPException(status_code=403, detail="Account is deactivated.")
+3006:         return {
+3007:             "success": True,
+3008:             "user": {
+3009:                 "id": user["id"],
+3010:                 "fullname": user["fullname"],
+3011:                 "email": user["email"],
+3012:                 "phone": user.get("phone"),
+3013:             },
+3014:             "message": "Google Login successful.",
+3015:         }
+3016: 
+3017:     # Otherwise create a new user with randomized password
+3018:     random_password = str(_uuid.uuid4())
+3019:     pw_hash = _bcrypt.hashpw(random_password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
+3020:     user_id = str(_uuid.uuid4())
+3021: 
+3022:     supabase_insert("users", {
+3023:         "id": user_id,
+3024:         "fullname": fullname,
+3025:         "email": email,
+3026:         "password_hash": pw_hash,
+3027:         "is_active": True,
+3028:     })
+3029: 
+3030:     return {
+3031:         "success": True,

@@ -26,7 +26,8 @@ import {
   Upload,
   CheckCircle,
   Loader2,
-  FileBadge
+  FileBadge,
+  Building2
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -50,7 +51,6 @@ export function CareerReport({ analysis, jobs, answers, onRestart }) {
   const {
     summary,
     careerPaths = [],
-    growthOutlook = [],
   } = analysis;
 
   const [activeTab, setActiveTab] = useState("report");
@@ -339,65 +339,7 @@ export function CareerReport({ analysis, jobs, answers, onRestart }) {
               </div>
             </div>
 
-            {/* Recharts Area Growth Outlook */}
-            {growthOutlook.length > 0 && (
-              <div className="rounded-3xl border border-border/70 bg-card/65 p-6 shadow-card space-y-6">
-                <div className="space-y-1.5">
-                  <h3 className="text-md font-bold text-foreground flex items-center gap-2">
-                    <TrendingUp className="h-5 w-5 text-primary" />
-                    5-Year Projected Trajectory
-                  </h3>
-                  <p className="text-xs text-muted-foreground">
-                    Market size and demand projection from 2026 to 2030 (Indexed at 100).
-                  </p>
-                </div>
 
-                <div className="h-72 w-full text-xs">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={growthOutlook} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                      <defs>
-                        {careerPaths.map((path, idx) => {
-                          const colors = pathColors[idx % pathColors.length];
-                          return (
-                            <linearGradient key={path.title} id={`grad-${idx}`} x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor={colors.stroke} stopOpacity={0.2}/>
-                              <stop offset="95%" stopColor={colors.stroke} stopOpacity={0.01}/>
-                            </linearGradient>
-                          );
-                        })}
-                      </defs>
-                      <XAxis dataKey="year" stroke="#888888" fontSize={10} tickLine={false} axisLine={false} />
-                      <YAxis stroke="#888888" fontSize={10} tickLine={false} axisLine={false} domain={[80, 'auto']} />
-                      <Tooltip
-                        contentStyle={{
-                          background: "rgba(30, 30, 40, 0.95)",
-                          border: "1px solid rgba(255,255,255,0.1)",
-                          borderRadius: "16px",
-                          fontSize: "11px",
-                          color: "#fff"
-                        }}
-                      />
-                      <Legend verticalAlign="top" height={36} iconType="circle" iconSize={8} />
-                      {careerPaths.map((path, idx) => {
-                        const colors = pathColors[idx % pathColors.length];
-                        return (
-                          <Area
-                            key={path.title}
-                            type="monotone"
-                            dataKey={`Path${idx + 1}`}
-                            name={path.title}
-                            stroke={colors.stroke}
-                            strokeWidth={2.5}
-                            fillOpacity={1}
-                            fill={`url(#grad-${idx})`}
-                          />
-                        );
-                      })}
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-            )}
           </motion.div>
         )}
 
@@ -444,69 +386,175 @@ export function CareerReport({ analysis, jobs, answers, onRestart }) {
                 <p className="text-xs text-foreground font-semibold">{marketError}</p>
               </div>
             ) : marketData ? (
-              <div className="grid gap-6 md:grid-cols-3">
-                {/* Salary Ranges */}
-                <div className="rounded-3xl border border-border/70 bg-card/65 p-6 shadow-card space-y-4">
-                  <h4 className="text-xs font-bold text-foreground uppercase tracking-wide flex items-center gap-1.5">
-                    <DollarSign className="h-4 w-4 text-primary" />
-                    Salary ranges (Live Statistics)
-                  </h4>
-                  <div className="space-y-2.5 text-xs font-semibold">
-                    <div className="p-3 bg-background/50 border border-border/30 rounded-xl flex justify-between">
-                      <span className="text-muted-foreground">Entry Level</span>
-                      <span className="text-foreground font-bold">{marketData.salary_ranges.entry}</span>
-                    </div>
-                    <div className="p-3 bg-background/50 border border-border/30 rounded-xl flex justify-between">
-                      <span className="text-muted-foreground">Mid-Career</span>
-                      <span className="text-foreground font-bold">{marketData.salary_ranges.mid}</span>
-                    </div>
-                    <div className="p-3 bg-background/50 border border-border/30 rounded-xl flex justify-between">
-                      <span className="text-muted-foreground">Senior Specialist</span>
-                      <span className="text-foreground font-bold">{marketData.salary_ranges.senior}</span>
-                    </div>
-                  </div>
+              marketData.insufficient_data ? (
+                <div className="rounded-3xl border border-warning/30 bg-warning/10 p-12 text-center space-y-4">
+                  <AlertTriangle className="h-8 w-8 text-warning mx-auto" />
+                  <p className="text-sm font-bold text-foreground">Not Enough Data</p>
+                  <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+                    {marketData.message || "Too few postings found for reliable statistics. Try a broader career title."}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">{marketData.total_postings} posting(s) found — minimum 10 required.</p>
+                </div>
+              ) : (
+              <div className="space-y-6">
+
+                {/* Meta header — source + last updated */}
+                <div className="flex flex-wrap items-center gap-3 text-[10px] text-muted-foreground font-semibold">
+                  <span className="flex items-center gap-1">
+                    <span className="h-1.5 w-1.5 rounded-full bg-success inline-block animate-pulse" />
+                    Live data — {marketData.total_postings} real postings analysed
+                  </span>
+                  {marketData.data_source?.map(s => (
+                    <span key={s} className="px-2 py-0.5 rounded-full bg-primary/10 text-primary font-bold">{s}</span>
+                  ))}
+                  {marketData.low_confidence && (
+                    <span className="px-2 py-0.5 rounded-full bg-warning/20 text-warning font-bold">⚠ Low confidence (&lt;30 postings)</span>
+                  )}
+                  <span className="ml-auto opacity-60">Updated {marketData.last_updated ? new Date(marketData.last_updated).toLocaleTimeString() : "—"}</span>
                 </div>
 
-                {/* Job Posting trend line */}
-                <div className="rounded-3xl border border-border/70 bg-card/65 p-6 shadow-card space-y-4 md:col-span-2">
-                  <h4 className="text-xs font-bold text-foreground uppercase tracking-wide flex items-center gap-1.5">
-                    <TrendingUp className="h-4 w-4 text-primary" />
-                    Historical Hiring Demand Trend Index
-                  </h4>
-                  <div className="h-56 w-full text-[10px]">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={marketData.historical_trend} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-                        <XAxis dataKey="year" stroke="#888888" tickLine={false} />
-                        <YAxis stroke="#888888" tickLine={false} />
-                        <Tooltip contentStyle={{ background: "#222", border: "1px solid #444", borderRadius: "10px" }} />
-                        <Line type="monotone" dataKey="Index" stroke="#6366f1" strokeWidth={2.5} />
-                      </LineChart>
-                    </ResponsiveContainer>
+                <div className="grid gap-6 md:grid-cols-3">
+                  {/* Salary Ranges */}
+                  <div className="rounded-3xl border border-border/70 bg-card/65 p-6 shadow-card space-y-4">
+                    <h4 className="text-xs font-bold text-foreground uppercase tracking-wide flex items-center gap-1.5">
+                      <DollarSign className="h-4 w-4 text-primary" />
+                      Salary Ranges
+                      {marketData.salary_ranges?.low_confidence && (
+                        <span className="ml-auto text-[9px] text-warning font-bold">⚠ few samples</span>
+                      )}
+                    </h4>
+                    <div className="space-y-2.5 text-xs font-semibold">
+                      {[
+                        { label: "Entry Level", key: "entry" },
+                        { label: "Mid-Career",  key: "mid" },
+                        { label: "Senior",      key: "senior" },
+                      ].map(({ label, key }) => (
+                        <div key={key} className="p-3 bg-background/50 border border-border/30 rounded-xl flex justify-between">
+                          <span className="text-muted-foreground">{label}</span>
+                          <span className="text-foreground font-bold">
+                            {marketData.salary_ranges?.[key] === "N/A" ? (
+                              <span className="text-muted-foreground italic">N/A</span>
+                            ) : (
+                              marketData.salary_ranges?.[key] || "N/A"
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[9px] text-muted-foreground leading-tight">
+                      Derived from P25/P50/P75 of {marketData.total_postings} real postings
+                    </p>
                   </div>
-                </div>
 
-                {/* Regional Salaries Bar Chart */}
-                <div className="rounded-3xl border border-border/70 bg-card/65 p-6 shadow-card space-y-4 md:col-span-3">
-                  <h4 className="text-xs font-bold text-foreground uppercase tracking-wide flex items-center gap-1.5">
-                    <MapPin className="h-4 w-4 text-primary" />
-                    Regional Salary Comparison (Annual USD Equivalent)
-                  </h4>
-                  <div className="h-64 w-full text-[10px]">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={marketData.regional_comparison} margin={{ top: 10, right: 5, left: -20, bottom: 5 }}>
-                        <XAxis dataKey="region" stroke="#888888" tickLine={false} />
-                        <YAxis stroke="#888888" tickLine={false} />
-                        <Tooltip contentStyle={{ background: "#222", border: "1px solid #444", borderRadius: "10px" }} />
-                        <Bar dataKey="salary" fill="#06b6d4" radius={[8, 8, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
+                  {/* In-Demand Skills */}
+                  <div className="rounded-3xl border border-border/70 bg-card/65 p-6 shadow-card space-y-4 md:col-span-2">
+                    <h4 className="text-xs font-bold text-foreground uppercase tracking-wide flex items-center gap-1.5">
+                      <Activity className="h-4 w-4 text-primary" />
+                      In-Demand Skills (from real postings)
+                    </h4>
+                    {marketData.in_demand_skills?.length > 0 ? (
+                      <div className="h-56 w-full text-[10px]">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart
+                            data={marketData.in_demand_skills.slice(0, 10)}
+                            layout="vertical"
+                            margin={{ top: 0, right: 20, left: 10, bottom: 0 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" horizontal={false} />
+                            <XAxis type="number" domain={[0, 100]} tickFormatter={v => `${v}%`} stroke="#888" tickLine={false} />
+                            <YAxis type="category" dataKey="skill" width={90} stroke="#888" tickLine={false} tick={{ fontSize: 10 }} />
+                            <Tooltip
+                              formatter={v => [`${v}%`, "Job Demand"]}
+                              contentStyle={{ background: "#1a1a2e", border: "1px solid #333", borderRadius: "10px", fontSize: "11px" }}
+                            />
+                            <Bar dataKey="demand_pct" fill="#6366f1" radius={[0, 6, 6, 0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">No skill data extracted from postings.</p>
+                    )}
+                  </div>
+
+                  {/* Top Hiring Companies */}
+                  <div className="rounded-3xl border border-border/70 bg-card/65 p-6 shadow-card space-y-4 md:col-span-2">
+                    <h4 className="text-xs font-bold text-foreground uppercase tracking-wide flex items-center gap-1.5">
+                      <Building2 className="h-4 w-4 text-primary" />
+                      Top Hiring Companies
+                    </h4>
+                    {marketData.top_companies?.length > 0 ? (
+                      <div className="h-52 w-full text-[10px]">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={marketData.top_companies.slice(0, 8)} layout="vertical" margin={{ top: 0, right: 20, left: 10, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" horizontal={false} />
+                            <XAxis type="number" stroke="#888" tickLine={false} />
+                            <YAxis type="category" dataKey="company" width={110} stroke="#888" tickLine={false} tick={{ fontSize: 10 }} />
+                            <Tooltip
+                              formatter={v => [v, "Openings found"]}
+                              contentStyle={{ background: "#1a1a2e", border: "1px solid #333", borderRadius: "10px", fontSize: "11px" }}
+                            />
+                            <Bar dataKey="openings" fill="#06b6d4" radius={[0, 6, 6, 0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">No company data found.</p>
+                    )}
+                  </div>
+
+                  {/* Job Type + Locations */}
+                  <div className="rounded-3xl border border-border/70 bg-card/65 p-6 shadow-card space-y-5">
+                    {/* Job Types */}
+                    <div>
+                      <h4 className="text-xs font-bold text-foreground uppercase tracking-wide flex items-center gap-1.5 mb-3">
+                        <Briefcase className="h-4 w-4 text-primary" />
+                        Job Types
+                      </h4>
+                      <div className="space-y-2">
+                        {(marketData.job_types || []).slice(0, 5).map((jt) => {
+                          const total_types = (marketData.job_types || []).reduce((s, x) => s + x.count, 0);
+                          const pct = total_types > 0 ? Math.round((jt.count / total_types) * 100) : 0;
+                          return (
+                            <div key={jt.type} className="space-y-1">
+                              <div className="flex justify-between text-[10px] font-semibold">
+                                <span className="text-muted-foreground">{jt.type || "Unknown"}</span>
+                                <span className="text-foreground">{pct}%</span>
+                              </div>
+                              <div className="h-1.5 w-full rounded-full bg-secondary/40 overflow-hidden">
+                                <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Top Locations */}
+                    {marketData.top_locations?.length > 0 && (
+                      <div>
+                        <h4 className="text-xs font-bold text-foreground uppercase tracking-wide flex items-center gap-1.5 mb-3">
+                          <MapPin className="h-4 w-4 text-primary" />
+                          Top Locations
+                        </h4>
+                        <div className="space-y-1.5 text-[10px]">
+                          {marketData.top_locations.slice(0, 5).map((loc) => (
+                            <div key={loc.location} className="flex justify-between text-muted-foreground font-semibold">
+                              <span>{loc.location}</span>
+                              <span className="text-foreground">{loc.count} jobs</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
+              )
             ) : null}
+
           </motion.div>
         )}
+
 
         {/* TAB 3: Skill Gap */}
         {activeTab === "skillgap" && (
