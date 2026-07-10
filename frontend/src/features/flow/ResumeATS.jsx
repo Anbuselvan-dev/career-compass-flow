@@ -82,8 +82,11 @@ export function ResumeATS({ answers, careerPaths }) {
   const handleFile = (f) => {
     if (!f) return;
     const ext = f.name.toLowerCase();
-    if (!ext.endsWith(".pdf") && !ext.endsWith(".docx")) {
-      setError("Only PDF and DOCX files are accepted.");
+    const isPdf = ext.endsWith(".pdf");
+    const isDocx = ext.endsWith(".docx");
+    const isImage = ext.endsWith(".png") || ext.endsWith(".jpg") || ext.endsWith(".jpeg");
+    if (!isPdf && !isDocx && !isImage) {
+      setError("Only PDF, DOCX, and Image (PNG, JPG, JPEG) files are accepted.");
       return;
     }
     setResumeFile(f);
@@ -142,7 +145,7 @@ export function ResumeATS({ answers, careerPaths }) {
             Resume ATS Intelligence Engine
           </h3>
           <p className="text-xs text-muted-foreground leading-relaxed">
-            Upload your resume (PDF or DOCX). We'll fetch 100–500 live job postings via JSearch,
+            Upload your resume (PDF, DOCX, or Image). We'll fetch 100–500 live job postings via JSearch,
             mathematically score your ATS compatibility across 7 categories, and generate
             personalized AI recommendations — all backed by real labour market data.
           </p>
@@ -167,7 +170,7 @@ export function ResumeATS({ answers, careerPaths }) {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".pdf,.docx"
+            accept=".pdf,.docx,.png,.jpg,.jpeg"
             className="hidden"
             onChange={(e) => handleFile(e.target.files[0])}
           />
@@ -188,7 +191,7 @@ export function ResumeATS({ answers, careerPaths }) {
               </div>
               <div>
                 <p className="text-sm font-bold text-foreground">Drop your resume here</p>
-                <p className="text-xs text-muted-foreground mt-0.5">PDF or DOCX — max 6 MB</p>
+                <p className="text-xs text-muted-foreground mt-0.5">PDF, DOCX, or Image — max 6 MB</p>
               </div>
             </>
           )}
