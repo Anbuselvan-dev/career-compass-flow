@@ -467,31 +467,60 @@ export function CareerFlow({ user }) {
   }
 
   return (
-    <main className="min-h-screen px-4 py-8 sm:py-14 bg-background">
-      <div className="mx-auto flex w-full max-w-2xl flex-col gap-8">
-        <header className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-primary text-primary-foreground shadow-soft">
-            <Sparkles className="h-4 w-4" />
+    <main className="min-h-dvh px-4 py-8 sm:py-14">
+      <div className="mx-auto flex w-full max-w-[720px] flex-col gap-8">
+        <header className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-primary text-primary-foreground shadow-glow">
+              <Sparkles className="h-4.5 w-4.5" />
+            </div>
+            <div>
+              <p className="text-[15px] font-bold tracking-tight text-foreground">Pathfinder</p>
+              <p className="text-xs text-muted-foreground">AI career intelligence</p>
+            </div>
           </div>
-          <div>
-            <p className="text-sm font-semibold tracking-tight text-foreground">Reality Checker</p>
-            <p className="text-xs text-muted-foreground">Mapping matches backed by live data.</p>
+          <div className="hidden sm:flex items-center gap-1.5 rounded-full glass-chip px-3 py-1.5 text-[11px] font-semibold text-muted-foreground">
+            <span className="h-1.5 w-1.5 rounded-full bg-success animate-pulse" />
+            Live data connected
           </div>
         </header>
 
-        {/* Form step tracker indicator */}
-        <div className="flex items-center justify-between text-xs font-semibold text-muted-foreground">
-          <span>{STEP_TITLES[step]}</span>
-          <span>Section {step + 1} of {totalSteps}</span>
-        </div>
+        <ProgressBar current={step} total={totalSteps} titles={STEP_TITLES} />
 
-        <section className="rounded-3xl border border-border/60 bg-card/75 p-6 shadow-card backdrop-blur-sm sm:p-9">
-          <div className="space-y-6">
-            
-            {/* Step 0: Academic Profile */}
-            {step === 0 && (
-              <div className="space-y-4">
-                <h3 className="text-md font-bold text-foreground border-b border-border/20 pb-2">Academic Profile</h3>
+        <AnimatePresence mode="wait">
+          <motion.section
+            key={step}
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12 }}
+            transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+            className="rounded-[28px] p-6 sm:p-10 glass-card"
+          >
+            <div className="mb-6 space-y-1.5">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-primary">
+                {STEP_TITLES[step]}
+              </p>
+              <h2 className="text-3xl sm:text-[36px] font-bold tracking-tight text-foreground leading-[1.1]">
+                {[
+                  "Tell us about your studies",
+                  "What can you already do?",
+                  "Where does your curiosity pull you?",
+                  "What matters most to you?",
+                  "The practical picture",
+                ][step]}
+              </h2>
+              <p className="text-[15px] text-muted-foreground leading-relaxed">
+                {[
+                  "A snapshot of your academic background helps us anchor the analysis in reality.",
+                  "Pick from suggested skills or add your own — anything you're comfortable using.",
+                  "Even a rough direction sharpens the recommendations we surface.",
+                  "Rank your values and pick the driver that best captures how you'd trade off.",
+                  "Where you'd work and what you want to avoid — filters that keep suggestions honest.",
+                ][step]}
+              </p>
+            </div>
+
+            <div className="space-y-6">
                 
                 <div className="space-y-1.5">
                   <label className="text-xs font-bold text-muted-foreground block">Degree / Course</label>
