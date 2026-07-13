@@ -909,35 +909,40 @@ export function CareerFlow({ user }) {
             )}
           </div>
 
-          <div className="mt-10 flex items-center justify-between gap-3 border-t border-border/60 pt-6">
-            <button
-              type="button"
-              onClick={handleBack}
-              className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              Back
-            </button>
+            <div className="mt-10 flex items-center justify-between gap-3 border-t border-border/60 pt-6">
+              <motion.button
+                type="button"
+                whileHover={{ x: -2 }}
+                whileTap={{ scale: 0.97 }}
+                onClick={handleBack}
+                className="inline-flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <ArrowLeft className="h-4 w-4" />
+                Back
+              </motion.button>
 
-            <button
-              type="button"
-              onClick={handleNext}
-              className="inline-flex items-center gap-2 rounded-full bg-gradient-primary px-7 py-2.5 text-sm font-semibold text-primary-foreground shadow-soft transition-all hover:-translate-y-0.5 hover:shadow-card"
-            >
-              {step < totalSteps - 1 ? (
-                <>
-                  Continue
-                  <ArrowRight className="h-4 w-4" />
-                </>
-              ) : (
-                <>
-                  Submit Analysis
-                  <Check className="h-4 w-4" />
-                </>
-              )}
-            </button>
-          </div>
-        </section>
+              <motion.button
+                type="button"
+                whileHover={{ y: -2 }}
+                whileTap={{ scale: 0.97 }}
+                onClick={handleNext}
+                className="inline-flex items-center gap-2 rounded-full bg-gradient-primary px-7 py-3 text-sm font-semibold text-primary-foreground shadow-glow transition-all"
+              >
+                {step < totalSteps - 1 ? (
+                  <>
+                    Continue
+                    <ArrowRight className="h-4 w-4" />
+                  </>
+                ) : (
+                  <>
+                    Submit analysis
+                    <Check className="h-4 w-4" />
+                  </>
+                )}
+              </motion.button>
+            </div>
+          </motion.section>
+        </AnimatePresence>
       </div>
     </main>
   );
