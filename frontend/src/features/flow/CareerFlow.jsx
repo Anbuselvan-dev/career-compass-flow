@@ -521,7 +521,10 @@ export function CareerFlow({ user }) {
             </div>
 
             <div className="space-y-6">
-                
+
+            {/* Step 0: Academic Profile */}
+            {step === 0 && (
+              <div className="space-y-4">
                 <div className="space-y-1.5">
                   <label className="text-xs font-bold text-muted-foreground block">Degree / Course</label>
                   <input
