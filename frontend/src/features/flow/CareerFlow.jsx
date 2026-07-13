@@ -320,15 +320,14 @@ export function CareerFlow({ user }) {
 
   if (restoring) {
     return (
-      <main className="flex min-h-screen items-center justify-center px-4 py-14 bg-background">
-        <div className="w-full max-w-md space-y-6 rounded-3xl border border-border/60 bg-card/70 p-8 text-center shadow-card backdrop-blur-sm">
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-gradient-primary text-primary-foreground shadow-soft animate-spin">
-            <RefreshCw className="h-7 w-7" />
+      <main className="flex min-h-dvh items-center justify-center px-4 py-14">
+        <div className="w-full max-w-md space-y-6 rounded-3xl p-10 text-center glass-card">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-primary text-primary-foreground shadow-glow">
+            <RefreshCw className="h-6 w-6 animate-spin" />
           </div>
           <div className="space-y-2">
-            <h2 className="text-xl font-bold tracking-tight text-foreground animate-pulse">
-              Restoring session...
-            </h2>
+            <h2 className="text-xl font-bold tracking-tight text-foreground">Restoring your session…</h2>
+            <p className="text-sm text-muted-foreground">Loading where you left off.</p>
           </div>
         </div>
       </main>
@@ -337,53 +336,67 @@ export function CareerFlow({ user }) {
 
   if (loading) {
     return (
-      <main className="flex min-h-screen items-center justify-center px-4 py-14 bg-background">
-        <div className="w-full max-w-md space-y-6 rounded-3xl border border-border/60 bg-card/70 p-8 text-center shadow-card backdrop-blur-sm">
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-gradient-primary text-primary-foreground shadow-soft animate-spin">
-            <RefreshCw className="h-7 w-7" />
+      <main className="flex min-h-dvh items-center justify-center px-4 py-14">
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-md space-y-6 rounded-3xl p-10 text-center glass-card"
+        >
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-primary text-primary-foreground shadow-glow">
+            <Sparkles className="h-7 w-7 animate-pulse" />
           </div>
           <div className="space-y-2">
-            <h2 className="text-xl font-bold tracking-tight text-foreground animate-pulse">
-              Mapping your potential...
-            </h2>
-            <p className="text-xs text-muted-foreground leading-relaxed">{loadingMessage}</p>
+            <h2 className="text-xl font-bold tracking-tight text-foreground">Mapping your potential…</h2>
+            <AnimatePresence mode="wait">
+              <motion.p
+                key={loadingMessage}
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.25 }}
+                className="text-sm text-muted-foreground leading-relaxed"
+              >
+                {loadingMessage}
+              </motion.p>
+            </AnimatePresence>
           </div>
-        </div>
+          <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-secondary/70">
+            <div
+              className="absolute inset-y-0 -left-1/3 w-1/3 rounded-full bg-gradient-primary"
+              style={{ animation: "shimmer 1.6s linear infinite" }}
+            />
+          </div>
+        </motion.div>
       </main>
     );
   }
 
   if (error) {
     return (
-      <main className="flex min-h-screen items-center justify-center px-4 py-14 bg-background">
-        <div className="w-full max-w-md space-y-6 rounded-3xl border border-destructive/20 bg-destructive/10 p-8 text-center shadow-card">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-destructive/20 text-destructive animate-pulse">
+      <main className="flex min-h-dvh items-center justify-center px-4 py-14">
+        <div className="w-full max-w-md space-y-6 rounded-3xl border border-destructive/20 p-10 text-center glass-card">
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-destructive/15 text-destructive">
             <AlertTriangle className="h-6 w-6" />
           </div>
           <div className="space-y-2">
-            <h2 className="text-xl font-bold tracking-tight text-foreground">
-              Analysis Failed
-            </h2>
-            <p className="text-xs text-muted-foreground leading-relaxed">{error}</p>
+            <h2 className="text-xl font-bold tracking-tight text-foreground">Analysis failed</h2>
+            <p className="text-sm text-muted-foreground leading-relaxed">{error}</p>
           </div>
           <div className="flex flex-col gap-2 pt-2">
             <button
               type="button"
               onClick={handleSubmit}
-              className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-primary px-6 py-3 text-xs font-semibold text-primary-foreground shadow-soft transition-all"
+              className="w-full inline-flex items-center justify-center gap-2 rounded-2xl bg-gradient-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-glow transition-all hover:-translate-y-0.5"
             >
               <RefreshCw className="h-4 w-4" />
-              Retry Analysis
+              Retry analysis
             </button>
             <button
               type="button"
-              onClick={() => {
-                setError(null);
-                setSubmitted(false);
-              }}
+              onClick={() => { setError(null); setSubmitted(false); }}
               className="w-full text-xs text-muted-foreground hover:text-foreground font-medium py-2"
             >
-              Go back to edit answers
+              Go back and edit
             </button>
           </div>
         </div>
@@ -393,7 +406,7 @@ export function CareerFlow({ user }) {
 
   if (submitted && result) {
     return (
-      <main className="min-h-screen px-4 py-8 sm:py-14 max-w-5xl mx-auto">
+      <main className="min-h-dvh px-4 py-8 sm:py-14 max-w-5xl mx-auto">
         <CareerReport
           analysis={result.analysis}
           jobs={result.jobs}
@@ -412,30 +425,43 @@ export function CareerFlow({ user }) {
 
   if (step === -1) {
     return (
-      <main className="flex min-h-screen items-center justify-center px-4 py-14 bg-background">
-        <div className="w-full max-w-2xl text-center space-y-8 rounded-3xl border border-border/60 bg-card/65 p-8 sm:p-12 shadow-card backdrop-blur-sm">
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-primary text-primary-foreground shadow-soft">
-            <Sparkles className="h-8 w-8 animate-pulse" />
+      <main className="flex min-h-dvh items-center justify-center px-4 py-14">
+        <motion.div
+          initial={{ opacity: 0, y: 20, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+          className="w-full max-w-2xl text-center space-y-8 rounded-[28px] p-10 sm:p-14 glass-card"
+        >
+          <div className="mx-auto inline-flex items-center gap-2 rounded-full glass-chip px-3.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-primary">
+            <Sparkles className="h-3.5 w-3.5" />
+            AI Career Intelligence
+          </div>
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-primary text-primary-foreground shadow-glow">
+            <Sparkles className="h-8 w-8" />
           </div>
           <div className="space-y-4">
-            <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight bg-gradient-to-r from-foreground via-foreground/90 to-muted-foreground bg-clip-text text-transparent">
-              Career Path Reality Checker
+            <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight text-gradient-primary">
+              Find a career that actually fits.
             </h1>
-            <p className="max-w-md mx-auto text-muted-foreground text-sm sm:text-base leading-relaxed">
-              Find work that fits your strengths, interests, and practical constraints. Powered by real-time labor market API data and dynamic AI progression roadmaps.
+            <p className="max-w-md mx-auto text-muted-foreground text-[15px] sm:text-base leading-relaxed">
+              A guided, conversational profile that maps your strengths, interests and constraints to
+              real roles — grounded in live labor-market data.
             </p>
           </div>
-          <div>
-            <button
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+            <motion.button
+              whileHover={{ y: -2 }}
+              whileTap={{ scale: 0.98 }}
               type="button"
               onClick={() => setStep(0)}
-              className="inline-flex items-center gap-2 rounded-full bg-gradient-primary px-8 py-3.5 text-sm font-bold text-primary-foreground shadow-soft transition-all hover:-translate-y-0.5 hover:shadow-card"
+              className="inline-flex items-center gap-2 rounded-full bg-gradient-primary px-8 py-3.5 text-sm font-semibold text-primary-foreground shadow-glow transition-all"
             >
-              Start Career Analysis
+              Begin your profile
               <ArrowRight className="h-4 w-4" />
-            </button>
+            </motion.button>
+            <span className="text-xs text-muted-foreground">Takes about 4 minutes · No account setup</span>
           </div>
-        </div>
+        </motion.div>
       </main>
     );
   }
