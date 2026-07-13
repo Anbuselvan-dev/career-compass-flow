@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { ArrowLeft, ArrowRight, Check, Sparkles, RefreshCw, AlertTriangle, X, Plus } from "lucide-react";
 import { CareerReport } from "./CareerReport";
+import { ProgressBar } from "./components";
 import { initialAnswers, STEP_TITLES } from "./types";
 
 export function CareerFlow({ user }) {
